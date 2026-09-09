@@ -1,0 +1,17 @@
+# Logos & Design assets
+logos/
+
+TestRunner.exe
+TestRunner.pdb
+*.pdb
+*.tmp
+*.suo
+*.user
+[0-9a-fA-F]*_EarGuard.exe
+
+# OS / Editor files
+.vs/
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
