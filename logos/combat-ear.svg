@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <!-- Dark Slate Rounded Squircle Background -->
+  <rect width="512" height="512" rx="112" fill="#0F172A" />
+
+  <!-- 1. The Human Ear (Lateral Side Profile, classic unmistakable ear silhouette) -->
+  <!-- Ear Outer Silhouette -->
+  <path d="M 230 140 
+           C 310 140, 360 190, 360 260 
+           C 360 330, 330 370, 320 400 
+           C 310 435, 270 450, 240 450 
+           C 210 450, 185 425, 195 390 
+           C 205 355, 220 335, 215 310 
+           C 210 290, 190 285, 175 285 
+           C 160 285, 155 265, 170 250 
+           C 185 235, 210 240, 220 220 
+           C 225 200, 210 160, 230 140 
+           Z" 
+        fill="#FFB07C" 
+        stroke="#1E293B" 
+        stroke-width="12" 
+        stroke-linejoin="round" />
+
+  <!-- Ear Outer Rim Curl (Helix) -->
+  <path d="M 235 155 
+           C 290 155, 335 195, 335 255 
+           C 335 320, 305 355, 290 385" 
+        fill="none" 
+        stroke="#1E293B" 
+        stroke-width="10" 
+        stroke-linecap="round" />
+
+  <!-- Inner Ear Cartilage (Antihelix & Concha / Canal) -->
+  <path d="M 290 230 
+           C 300 270, 285 320, 255 335 
+           C 235 345, 225 330, 230 310 
+           C 235 290, 250 275, 250 250 
+           C 250 230, 240 215, 255 205" 
+        fill="none" 
+        stroke="#1E293B" 
+        stroke-width="10" 
+        stroke-linecap="round" />
+
+  <!-- Ear Canal Depth Shade (Simple dark tone) -->
+  <path d="M 225 280 C 215 290, 215 315, 230 315 C 245 315, 250 295, 240 280 Z" fill="#D84315" opacity="0.8" />
+
+  <!-- 2. The Combat Helmet (Perched directly on top of the ear curve, slightly tilted) -->
+  <g transform="translate(4, -10) rotate(-6 240 130)">
+    <!-- Helmet Dome Shell -->
+    <path d="M 125 150 
+             C 115 65, 175 25, 255 25 
+             C 335 25, 395 65, 385 150 
+             Z" 
+          fill="#3F5338" 
+          stroke="#1E293B" 
+          stroke-width="12" 
+          stroke-linejoin="round" />
+
+    <!-- Helmet Visor Brim -->
+    <path d="M 105 150 
+             C 155 138, 255 138, 405 150 
+             C 410 162, 395 174, 380 170 
+             C 255 158, 155 158, 120 170 
+             C 105 166, 100 158, 105 150 
+             Z" 
+          fill="#253521" 
+          stroke="#1E293B" 
+          stroke-width="10" 
+          stroke-linejoin="round" />
+
+    <!-- Minimal Clean Helmet Highlight Arc -->
+    <path d="M 175 65 C 215 45, 295 45, 335 65" fill="none" stroke="#688B5D" stroke-width="10" stroke-linecap="round" opacity="0.6" />
+
+    <!-- Front Helmet Combat Star / Shield Rivet -->
+    <circle cx="255" cy="85" r="8" fill="#F59E0B" stroke="#1E293B" stroke-width="3" />
+  </g>
+</svg>

@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="k_bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#1E1B4B"/>
+    </linearGradient>
+    <linearGradient id="k_steel" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F1F5F9"/>
+      <stop offset="50%" stop-color="#94A3B8"/>
+      <stop offset="100%" stop-color="#475569"/>
+    </linearGradient>
+    <linearGradient id="k_steelDark" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#64748B"/>
+      <stop offset="100%" stop-color="#334155"/>
+    </linearGradient>
+    <linearGradient id="k_ear" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFDFC0"/>
+      <stop offset="100%" stop-color="#F5A870"/>
+    </linearGradient>
+    <linearGradient id="k_shield" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10B981"/>
+      <stop offset="100%" stop-color="#064E3B"/>
+    </linearGradient>
+    <linearGradient id="k_gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FEF08A"/>
+      <stop offset="50%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#B45309"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Dark Rounded Container -->
+  <rect width="512" height="512" rx="96" fill="url(#k_bg)" />
+
+  <!-- 1. The Ear Body -->
+  <path d="M 220 160 
+           C 150 160, 120 220, 120 300 
+           C 120 390, 160 435, 225 435 
+           C 265 435, 300 405, 300 365 
+           C 300 325, 265 305, 265 270 
+           C 265 220, 305 180, 260 160 
+           Z" 
+        fill="url(#k_ear)" 
+        stroke="#C2410C" 
+        stroke-width="8" />
+
+  <path d="M 195 230 C 160 250, 155 330, 195 355 C 225 370, 235 330, 225 305" 
+        fill="none" 
+        stroke="#FB923C" 
+        stroke-width="10" 
+        stroke-linecap="round" />
+
+  <!-- Cartoon Eye peering out from beneath helmet -->
+  <circle cx="205" cy="275" r="7" fill="#1E293B"/>
+  <circle cx="207" cy="273" r="2.5" fill="#FFFFFF"/>
+
+  <!-- 2. Medieval Knight Helmet on Top of Ear -->
+  <!-- Helmet Dome (Great Helm / Sallet) -->
+  <path d="M 130 185 
+           C 120 95, 180 40, 260 40 
+           C 340 40, 375 95, 365 185 
+           Z" 
+        fill="url(#k_steel)" 
+        stroke="#1E293B" 
+        stroke-width="8" />
+
+  <!-- Emerald Plume / Feather Crest on Crown -->
+  <path d="M 260 40 Q 305 -5 345 12 Q 325 35 285 40 Z" fill="#10B981" stroke="#047857" stroke-width="4"/>
+  <path d="M 265 38 Q 295 10 320 20" stroke="#A7F3D0" stroke-width="3" fill="none"/>
+
+  <!-- Visor Plate -->
+  <path d="M 125 185 L 370 185 L 355 240 L 260 258 L 140 240 Z" 
+        fill="url(#k_steelDark)" 
+        stroke="#0F172A" 
+        stroke-width="7" />
+
+  <!-- Visor Eye Slits (Cleanly centered) -->
+  <rect x="170" y="200" width="55" height="8" rx="4" fill="#0F172A"/>
+  <rect x="245" y="200" width="55" height="8" rx="4" fill="#0F172A"/>
+
+  <!-- Gold Rivets on Helmet -->
+  <circle cx="145" cy="195" r="5" fill="url(#k_gold)" stroke="#78350F" stroke-width="2"/>
+  <circle cx="350" cy="195" r="5" fill="url(#k_gold)" stroke="#78350F" stroke-width="2"/>
+  <circle cx="260" cy="55" r="6" fill="url(#k_gold)" stroke="#78350F" stroke-width="2"/>
+
+  <!-- 3. Knight's Tower Shield (Clean geometric curves, zero artifacts) -->
+  <g transform="translate(235, 215)">
+    <!-- Shield Outer Gold Rim -->
+    <path d="M 0 10 
+             L 160 10 
+             L 160 110 
+             C 160 180, 80 215, 80 215 
+             C 80 215, 0 180, 0 110 
+             Z" 
+          fill="url(#k_shield)" 
+          stroke="url(#k_gold)" 
+          stroke-width="8" 
+          stroke-linejoin="round" />
+
+    <!-- Shield Cross Motif -->
+    <path d="M 80 20 L 80 190 M 20 80 L 140 80" stroke="#34D399" stroke-width="8" stroke-linecap="round" opacity="0.4"/>
+
+    <!-- Central Prohibition Badge: NO 100% SPIKE -->
+    <circle cx="80" cy="100" r="42" fill="#064E3B" stroke="#A7F3D0" stroke-width="3"/>
+    <circle cx="80" cy="100" r="34" fill="none" stroke="#EF4444" stroke-width="6"/>
+    <!-- Diagonal Strike line -->
+    <line x1="56" y1="76" x2="104" y2="124" stroke="#EF4444" stroke-width="6" stroke-linecap="round"/>
+
+    <!-- 100% Spike Text inside shield badge -->
+    <text x="80" y="97" fill="#FFFFFF" font-family="Segoe UI, sans-serif" font-weight="900" font-size="16" text-anchor="middle">100%</text>
+    <text x="80" y="115" fill="#FCA5A5" font-family="Segoe UI, sans-serif" font-weight="800" font-size="10" text-anchor="middle">SPIKE</text>
+  </g>
+
+  <!-- Incoming Noise Spike Bolts Deflected on Right (Safely distanced from shield border) -->
+  <path d="M 470 210 L 415 250" stroke="#EF4444" stroke-width="6" stroke-linecap="round"/>
+  <path d="M 480 280 L 415 295" stroke="#EF4444" stroke-width="6" stroke-linecap="round"/>
+  <!-- Gold Impact Sparks -->
+  <polygon points="410,250 422,242 418,255 426,260 412,258" fill="#FBBF24"/>
+  <polygon points="410,295 422,287 418,300 426,305 412,303" fill="#FBBF24"/>
+
+  <!-- 4. Clean Bottom Banner: "NONE SHALL DEAFEN" with ample vertical clearance -->
+  <g transform="translate(86, 448)">
+    <rect width="340" height="42" rx="10" fill="#1E293B" stroke="url(#k_gold)" stroke-width="3" />
+    <text x="170" y="27" fill="#F8FAFC" font-family="Segoe UI, sans-serif" font-weight="900" font-size="16" text-anchor="middle" letter-spacing="2">NONE SHALL DEAFEN</text>
+  </g>
+</svg>

@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#1E293B"/>
+    </linearGradient>
+    <linearGradient id="hatGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FDE047"/>
+      <stop offset="40%" stop-color="#FACC15"/>
+      <stop offset="100%" stop-color="#CA8A04"/>
+    </linearGradient>
+    <linearGradient id="brimGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FACC15"/>
+      <stop offset="100%" stop-color="#A16207"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Dark Slate Rounded Squircle Background -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" />
+
+  <!-- COMPOSITE GROUP: Balanced 65px top margin and 67px bottom margin -->
+  <g id="ear-guard-logo">
+
+    <!-- 1. The Human Ear (Official Twemoji Vector, full ear clearly visible) -->
+    <g transform="translate(85, 142) scale(9.5)">
+      <!-- Base Ear Flesh -->
+      <path fill="#FFC988" stroke="#0F172A" stroke-width="1.2" stroke-linejoin="round" d="M31 14c-1 6-5 8-6 13-1.606 8.034-6.267 9-11 9-7.75 0-3.856-7.568-7-17-3-9-2.716-15.899 7-18 9.25-2 18.634 3.194 17 13z"/>
+      <!-- Outer Helix Swirl & Rim -->
+      <path fill="#E07A22" d="M23.999 22c-.19 0-.383-.055-.554-.168-.46-.307-.584-.927-.277-1.387.491-.737.968-1.34 1.429-1.923C25.992 16.756 27 15.481 27 12c0-2.21-.782-3.975-2.323-5.246-2.193-1.806-5.827-2.486-9.485-1.773-1.861.363-3.194 1.215-4.074 2.604-2.061 3.253-.827 8.243-.814 8.293.136.535-.188 1.08-.723 1.215-.538.139-1.08-.188-1.215-.723-.061-.238-1.454-5.883 1.063-9.856 1.174-1.853 2.984-3.029 5.381-3.497 4.227-.825 8.496.015 11.14 2.192C27.944 6.855 29 9.203 29 12c0 4.175-1.377 5.917-2.835 7.763-.436.552-.887 1.122-1.333 1.792-.192.289-.51.445-.833.445z"/>
+      <!-- Inner Concha Cartilage Swirl -->
+      <path fill="#E07A22" d="M11.585 26.917c-.367 0-.72-.202-.896-.553-.551-1.103-.367-1.995-.116-2.549.545-1.202 1.916-1.935 2.924-2.199 1.997-.668 2.975-3.34 2.442-5.181-.572-1.974-2.651-2.673-5.701-1.922-.53.134-1.078-.194-1.21-.731-.132-.536.195-1.078.731-1.21 4.914-1.214 7.407.914 8.1 3.308.798 2.755-.564 6.577-3.794 7.653-.588.156-1.434.585-1.672 1.109-.068.149-.132.396.083.828.247.494.047 1.095-.447 1.342-.142.071-.295.105-.444.105z"/>
+    </g>
+
+    <!-- 2. Refined Construction Hard Hat (Centered, low-profile crown ridge, visor brim) -->
+    <!-- Hard Hat Dome -->
+    <path d="M 125 180 
+             C 125 85, 185 55, 256 55 
+             C 327 55, 387 85, 387 180 
+             Z" 
+          fill="url(#hatGrad)" 
+          stroke="#0F172A" 
+          stroke-width="12" 
+          stroke-linejoin="round" />
+
+    <!-- Hard Hat Crown Structural Ridge -->
+    <path d="M 145 150 C 165 92, 210 68, 275 68" fill="none" stroke="#FEF08A" stroke-width="12" stroke-linecap="round" opacity="0.85"/>
+    <path d="M 195 174 C 205 115, 245 80, 310 80" fill="none" stroke="#CA8A04" stroke-width="7" stroke-linecap="round" opacity="0.35"/>
+
+    <!-- Hard Hat Visor Brim (Symmetrical, front peak on left) -->
+    <path d="M 80 180 
+             C 125 166, 175 174, 256 174 
+             C 337 174, 395 168, 432 180 
+             C 436 194, 418 206, 396 202 
+             C 340 192, 172 192, 102 202 
+             C 85 198, 77 192, 80 180 
+             Z" 
+          fill="url(#brimGrad)" 
+          stroke="#0F172A" 
+          stroke-width="11" 
+          stroke-linejoin="round" />
+
+    <!-- Hard Hat Brim Highlight Edge -->
+    <path d="M 98 184 C 150 176, 256 176, 412 184" fill="none" stroke="#FEF08A" stroke-width="4" stroke-linecap="round" opacity="0.8"/>
+  </g>
+</svg>

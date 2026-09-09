@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="r_bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#18181B"/>
+      <stop offset="100%" stop-color="#27272A"/>
+    </linearGradient>
+    <linearGradient id="r_ear" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FED7AA"/>
+      <stop offset="100%" stop-color="#FDBA74"/>
+    </linearGradient>
+    <linearGradient id="r_muff" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FDE047"/>
+      <stop offset="50%" stop-color="#EAB308"/>
+      <stop offset="100%" stop-color="#CA8A04"/>
+    </linearGradient>
+    <linearGradient id="r_hat" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#F97316"/>
+      <stop offset="100%" stop-color="#C2410C"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Dark Rounded Container -->
+  <rect width="512" height="512" rx="96" fill="url(#r_bg)" />
+
+  <!-- High-Contrast Soundwaves on Left -->
+  <path d="M 85 190 Q 45 256 85 322" fill="none" stroke="#60A5FA" stroke-width="8" stroke-linecap="round" opacity="0.6"/>
+  <path d="M 55 150 Q 5 256 55 362" fill="none" stroke="#3B82F6" stroke-width="10" stroke-linecap="round" opacity="0.4"/>
+
+  <!-- 1. The Main Outer Ear -->
+  <path d="M 235 140 
+           C 145 140, 110 210, 110 295 
+           C 110 395, 160 445, 235 445 
+           C 285 445, 325 410, 325 360 
+           C 325 320, 285 300, 285 260 
+           C 285 200, 335 165, 275 145 
+           Z" 
+        fill="url(#r_ear)" 
+        stroke="#EA580C" 
+        stroke-width="8" 
+        stroke-linejoin="round" />
+
+  <!-- Ear Inner Cartilage -->
+  <path d="M 195 210 C 155 240, 150 330, 200 355 C 230 365, 240 330, 230 300" 
+        fill="none" 
+        stroke="#FB923C" 
+        stroke-width="10" 
+        stroke-linecap="round" />
+
+  <!-- Happy Cartoon Eyes & Smile on Ear -->
+  <!-- Left Eye: Cute happy arc -->
+  <path d="M 180 260 Q 195 246 210 260" fill="none" stroke="#7C2D12" stroke-width="6" stroke-linecap="round" />
+  <!-- Cheerful smile -->
+  <path d="M 185 305 Q 200 320 215 305" fill="none" stroke="#7C2D12" stroke-width="6" stroke-linecap="round" />
+  <!-- Rosy cheek -->
+  <ellipse cx="170" cy="285" rx="10" ry="6" fill="#F87171" opacity="0.6"/>
+
+  <!-- 2. Earmuff Headband arching over top -->
+  <path d="M 180 160 Q 230 115 280 160" fill="none" stroke="#09090B" stroke-width="16" stroke-linecap="round" />
+  <path d="M 180 160 Q 230 115 280 160" fill="none" stroke="#71717A" stroke-width="6" stroke-linecap="round" />
+
+  <!-- 3. Industrial Earmuff Cup (Clamped onto the ear) -->
+  <!-- Black Cushion Seal -->
+  <rect x="235" y="215" width="75" height="110" rx="35" fill="#09090B" stroke="#27272A" stroke-width="4" />
+  <!-- Yellow Hi-Vis Dome -->
+  <rect x="245" y="222" width="60" height="96" rx="28" fill="url(#r_muff)" stroke="#713F12" stroke-width="5" />
+  <!-- Gloss reflection -->
+  <path d="M 260 235 Q 288 235 288 265" fill="none" stroke="#FEF08A" stroke-width="6" stroke-linecap="round" />
+  <!-- Hearing Protection Decal -->
+  <circle cx="275" cy="275" r="14" fill="#09090B" />
+  <path d="M 270 275 L 273 278 L 280 271" fill="none" stroke="#FDE047" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Opposing Cup peeking from behind -->
+  <rect x="135" y="225" width="28" height="80" rx="12" fill="#854D0E" stroke="#18181B" stroke-width="4" opacity="0.8"/>
+
+  <!-- 4. Construction Hard Hat on Top of Ear -->
+  <!-- Hard Hat Shell -->
+  <path d="M 140 145 
+           C 140 70, 200 45, 270 45 
+           C 340 45, 380 90, 370 145 
+           Z" 
+        fill="url(#r_hat)" 
+        stroke="#7C2D12" 
+        stroke-width="8" />
+
+  <!-- Hard Hat Ridge Rib -->
+  <path d="M 255 45 L 255 140" stroke="#EA580C" stroke-width="12" stroke-linecap="round" />
+  <path d="M 255 45 L 255 140" stroke="#FFEDD5" stroke-width="4" stroke-linecap="round" opacity="0.6"/>
+
+  <!-- Hard Hat Brim -->
+  <path d="M 120 145 C 160 135, 340 135, 390 145 C 395 155, 375 165, 360 162 C 260 152, 180 152, 130 162 Z" 
+        fill="#C2410C" 
+        stroke="#7C2D12" 
+        stroke-width="6" />
+
+  <!-- EarGuard Emblem on Hardhat -->
+  <circle cx="255" cy="105" r="18" fill="#10B981" stroke="#047857" stroke-width="3"/>
+  <path d="M 248 105 L 253 110 L 263 100" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 5. Seamless Unified Status Bubble in Lower Right: "SAFE: 30%" -->
+  <g transform="translate(305, 365)">
+    <!-- Single unified path including the pointer with zero seam -->
+    <path d="M 20 0 
+             L 30 -14 
+             L 40 0 
+             L 145 0 
+             A 12 12 0 0 1 157 12 
+             L 157 36 
+             A 12 12 0 0 1 145 48 
+             L 12 48 
+             A 12 12 0 0 1 0 36 
+             L 0 12 
+             A 12 12 0 0 1 12 0 
+             Z" 
+          fill="#10B981" 
+          stroke="#34D399" 
+          stroke-width="3" />
+    <text x="82" y="31" fill="#FFFFFF" font-family="Segoe UI, sans-serif" font-weight="900" font-size="18" text-anchor="middle">SAFE 30%</text>
+  </g>
+</svg>

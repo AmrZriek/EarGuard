@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <!-- Dark Slate Rounded Squircle Background -->
+  <rect width="512" height="512" rx="112" fill="#0F172A" />
+
+  <!-- 1. The Human Ear (Textbook ear silhouette: unmistakable outer C-curve, inner helix fold, and distinct dangling lobe) -->
+  <!-- Outer Ear Body -->
+  <path d="M 180 205 
+           C 160 225, 155 270, 175 285 
+           C 185 292, 185 308, 175 315 
+           C 160 325, 160 365, 185 395 
+           C 205 420, 230 445, 265 445 
+           C 305 445, 335 410, 335 365 
+           C 335 340, 355 310, 355 260 
+           C 355 205, 305 185, 235 185 
+           Z" 
+        fill="#FFB07C" 
+        stroke="#1E293B" 
+        stroke-width="12" 
+        stroke-linejoin="round" />
+
+  <!-- Outer Helix Rim Curl (Thick natural outer rim fold) -->
+  <path d="M 205 195 
+           C 285 190, 335 215, 335 265 
+           C 335 320, 315 350, 315 375 
+           C 315 410, 290 425, 265 425" 
+        fill="none" 
+        stroke="#1E293B" 
+        stroke-width="10" 
+        stroke-linecap="round" />
+
+  <!-- Inner Antihelix & Concha (Continuous classic anatomical question-mark fold) -->
+  <path d="M 275 235 
+           C 295 265, 295 315, 275 345 
+           C 255 375, 225 365, 215 340 
+           C 205 315, 225 295, 250 295 
+           C 265 295, 270 310, 260 320" 
+        fill="none" 
+        stroke="#1E293B" 
+        stroke-width="10" 
+        stroke-linecap="round" />
+
+  <!-- Ear Canal Depth Shading (Subtle warm shadow, not a floating dot) -->
+  <path d="M 215 325 C 210 335, 220 345, 235 345 C 245 345, 250 335, 245 325 Z" fill="#E65100" opacity="0.6" />
+
+  <!-- 2. The Royal Guard Bearskin Hat (Centered symmetrically on top) -->
+  <!-- Tall Bearskin Silhouette -->
+  <path d="M 155 200 
+           C 150 120, 155 45, 256 45 
+           C 357 45, 362 120, 357 200 
+           C 320 212, 192 212, 155 200 
+           Z" 
+        fill="#18181B" 
+        stroke="#09090B" 
+        stroke-width="12" 
+        stroke-linejoin="round" />
+
+  <!-- Subtle Bearskin Texture Ribs -->
+  <path d="M 195 85 Q 198 135 195 185" stroke="#27272A" stroke-width="8" stroke-linecap="round" />
+  <path d="M 256 70 Q 256 130 256 190" stroke="#27272A" stroke-width="8" stroke-linecap="round" />
+  <path d="M 317 85 Q 314 135 317 185" stroke="#27272A" stroke-width="8" stroke-linecap="round" />
+
+  <!-- 3. Golden Chin-Chain (Iconic Royal Guard curb chain draping across the ear) -->
+  <path d="M 155 200 Q 240 240 357 200" fill="none" stroke="#F59E0B" stroke-width="14" stroke-linecap="round" stroke-dasharray="16 7" />
+  <path d="M 155 200 Q 240 240 357 200" fill="none" stroke="#FEF08A" stroke-width="5" stroke-linecap="round" stroke-dasharray="16 7" />
+
+  <!-- Golden Boss / Medallions on sides -->
+  <circle cx="155" cy="200" r="10" fill="#F59E0B" stroke="#B45309" stroke-width="3" />
+  <circle cx="357" cy="200" r="10" fill="#F59E0B" stroke="#B45309" stroke-width="3" />
+</svg>
