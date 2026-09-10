@@ -11,7 +11,7 @@
   <a href="https://github.com/AmrZriek/EarGuard/releases/latest/download/EarGuard.exe"><img src="https://img.shields.io/badge/Download-EarGuard.exe-brightgreen?style=flat-square&logo=windows" alt="Download" /></a>
   <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D6?style=flat-square&logo=windows" alt="Platform" />
   <img src="https://img.shields.io/badge/.NET%20Framework-4.8%20(Native)-512BD4?style=flat-square" alt=".NET" />
-  <img src="https://img.shields.io/badge/Binary%20Size-65%20KB-success?style=flat-square" alt="Size" />
+  <img src="https://img.shields.io/badge/Binary%20Size-76%20KB-success?style=flat-square" alt="Size" />
   <img src="https://img.shields.io/badge/Latency-%3C2ms%20Hardware%20Clamp-orange?style=flat-square" alt="Latency" />
   <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="License" />
   <a href="https://ko-fi.com/amrzriek"><img src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?style=flat-square&logo=kofi&logoColor=white" alt="Ko-fi" /></a>
@@ -62,7 +62,7 @@ No bloated Electron. No web views. No 300 MB installer. Just clean, native Windo
 * **⚡ Tested Safe-Clamp Button:** The "Test Clamp" button spikes volume **strictly 2% above your ceiling** (e.g. 30% → 32%). It proves your hardware clamp works with zero risk of deafening you.
 * **🎯 Tidal Exclusive Mode Tamed:** Operates at the physical endpoint layer (`IAudioEndpointVolume`), meaning it clamps even when bit-perfect players bypass the Windows software mixer.
 * **🍃 Featherweight Footprint:** 
-  * Single standalone portable executable (**~64 KB**).
+  * Single standalone portable executable (**~76 KB**).
   * **0.0% CPU** usage (100% event-driven, zero polling loops).
   * Built into .NET Framework 4.8—runs out-of-the-box on every Windows 10 and 11 PC with zero prerequisites.
 * **🤫 Silent Background Startup:** When "Start EarGuard automatically with Windows" is enabled, EarGuard launches silently into your system tray (`--tray`) on PC boot with zero intrusive popups or window flashes. Double-clicking the app or clicking the tray icon brings up the interface instantly.

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -23,6 +24,7 @@ namespace EarGuard.Audio
     public class AudioEngine : IDisposable
     {
         public static readonly Guid ContextGuid = Guid.NewGuid();
+        public const int WatchdogIntervalMs = 100;
 
         private readonly ConfigStore _configStore;
         private readonly EarGuardConfig _config;
@@ -33,8 +35,17 @@ namespace EarGuard.Audio
         private IMMDeviceEnumerator _enumerator;
         private AudioNotificationClient _notificationClient;
         private Timer _watchdogTimer;
+        private Thread _workerThread;
+        private BlockingCollection<Action> _workQueue;
+        private volatile bool _workerRunning;
+        private IntPtr _mmcssHandle = IntPtr.Zero;
+        private int _resyncPending;
         private bool _isDisposed;
 
+        [ThreadStatic]
+        private static bool t_isMmcssRegistered;
+
+        public bool IsMmcssActive { get; private set; }
         public event EventHandler<VolumeClampedEventArgs> VolumeClamped;
         public event EventHandler DevicesChanged;
         public event EventHandler<GuardedDevice> VolumeChanged;
@@ -69,6 +80,17 @@ namespace EarGuard.Audio
             {
                 if (_enumerator != null) return;
 
+                // Start prioritized Pro Audio MMCSS worker thread
+                _workQueue = new BlockingCollection<Action>();
+                _workerRunning = true;
+                _workerThread = new Thread(WorkerThreadProc)
+                {
+                    Name = "EarGuard Pro-Audio Worker",
+                    IsBackground = true,
+                    Priority = ThreadPriority.Highest
+                };
+                _workerThread.Start();
+
                 try
                 {
                     _enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
@@ -82,9 +104,84 @@ namespace EarGuard.Audio
 
                 ScanDevices();
 
-                // Defense-in-depth watchdog running every 1000ms
-                _watchdogTimer = new Timer(WatchdogTick, null, 1000, 1000);
+                // Defense-in-depth ultra-fast watchdog running every 100ms
+                _watchdogTimer = new Timer(WatchdogTick, null, WatchdogIntervalMs, WatchdogIntervalMs);
             }
+        }
+
+        private void WorkerThreadProc()
+        {
+            int taskIndex = 0;
+            try
+            {
+                _mmcssHandle = CoreAudioConstants.AvSetMmThreadCharacteristics("Pro Audio", ref taskIndex);
+                if (_mmcssHandle != IntPtr.Zero)
+                {
+                    IsMmcssActive = true;
+                }
+                Thread.CurrentThread.Priority = ThreadPriority.Highest;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("MMCSS registration failed: " + ex.Message);
+            }
+
+            while (_workerRunning)
+            {
+                try
+                {
+                    Action action;
+                    if (_workQueue.TryTake(out action, 500))
+                    {
+                        if (action != null && !_isDisposed)
+                        {
+                            action();
+                        }
+                    }
+                }
+                catch (ThreadAbortException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine("Worker thread error: " + ex.Message);
+                }
+            }
+
+            if (_mmcssHandle != IntPtr.Zero)
+            {
+                try
+                {
+                    CoreAudioConstants.AvRevertMmThreadCharacteristics(_mmcssHandle);
+                }
+                catch { }
+                _mmcssHandle = IntPtr.Zero;
+                IsMmcssActive = false;
+            }
+        }
+
+        private void PostWork(Action action)
+        {
+            if (!_workerRunning || _isDisposed || _workQueue == null) return;
+            try
+            {
+                _workQueue.Add(action);
+            }
+            catch { }
+        }
+
+        private static void EnsureThreadMmcss()
+        {
+            if (t_isMmcssRegistered) return;
+            try
+            {
+                int taskIndex = 0;
+                CoreAudioConstants.AvSetMmThreadCharacteristics("Pro Audio", ref taskIndex);
+                Thread.CurrentThread.Priority = ThreadPriority.Highest;
+                t_isMmcssRegistered = true;
+            }
+            catch { }
         }
 
         public void ScanDevices()
@@ -102,8 +199,20 @@ namespace EarGuard.Audio
                         out col
                     );
 
-                    if (hr != 0 || col == null) return;
+                    if (hr != 0 || col == null)
+                    {
+                        ReinitializeEnumerator();
+                        if (_enumerator != null)
+                        {
+                            _enumerator.EnumAudioEndpoints(
+                                CoreAudioConstants.E_RENDER,
+                                CoreAudioConstants.DEVICE_STATE_ACTIVE,
+                                out col
+                            );
+                        }
+                    }
 
+                    if (col == null) return;
                     uint count = 0;
                     col.GetCount(out count);
 
@@ -130,6 +239,37 @@ namespace EarGuard.Audio
                         if (existing != null)
                         {
                             Marshal.ReleaseComObject(dev);
+                            if (existing.VolumeControl != null && existing.Config != null && existing.Config.Enabled)
+                            {
+                                try
+                                {
+                                    float existingVol = 0f;
+                                    int ehr = existing.VolumeControl.GetMasterVolumeLevelScalar(out existingVol);
+                                    if (ehr == 0)
+                                    {
+                                        existing.CurrentVolume = existingVol;
+                                        if (existingVol > existing.Config.MaxLimit + 0.0001f)
+                                        {
+                                            Guid ctx = ContextGuid;
+                                            existing.VolumeControl.SetMasterVolumeLevelScalar(existing.Config.MaxLimit, ref ctx);
+                                            float oldVol = existing.CurrentVolume;
+                                            existing.CurrentVolume = existing.Config.MaxLimit;
+                                            RaiseVolumeClamped(existing, oldVol, existing.Config.MaxLimit);
+                                        }
+                                    }
+                                    else if (IsRpcErrorCode(ehr))
+                                    {
+                                        TriggerFastResync(existing.DeviceId);
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    if (IsRpcOrComException(ex))
+                                    {
+                                        TriggerFastResync(existing.DeviceId);
+                                    }
+                                }
+                            }
                             continue;
                         }
 
@@ -256,10 +396,12 @@ namespace EarGuard.Audio
 
         private void OnHardwareDevicesChanged()
         {
-            // Run on threadpool to avoid blocking COM thread
-            ThreadPool.QueueUserWorkItem(_ =>
+            // Scan immediately so a newly enumerated endpoint is clamped before playback.
+            // Retry once after AudioSrv finishes any USB re-indexing race.
+            PostWork(() =>
             {
-                Thread.Sleep(100); // Allow Windows AudioSrv to finish re-indexing
+                ScanDevices();
+                Thread.Sleep(100);
                 ScanDevices();
             });
         }
@@ -267,6 +409,9 @@ namespace EarGuard.Audio
         private void HandleVolumeNotification(GuardedDevice guarded, AUDIO_VOLUME_NOTIFICATION_DATA data)
         {
             if (_isDisposed || guarded == null || guarded.Config == null) return;
+
+            // Prioritize incoming COM callback thread under Pro-Audio MMCSS
+            EnsureThreadMmcss();
 
             float newVol = data.fMasterVolume;
 
@@ -291,15 +436,25 @@ namespace EarGuard.Audio
                 try
                 {
                     Guid ctx = ContextGuid;
-                    guarded.VolumeControl.SetMasterVolumeLevelScalar(guarded.Config.MaxLimit, ref ctx);
-                    guarded.CurrentVolume = guarded.Config.MaxLimit;
-                    guarded.IsClampedAlert = true;
-
-                    RaiseVolumeClamped(guarded, newVol, guarded.Config.MaxLimit);
+                    int hr = guarded.VolumeControl.SetMasterVolumeLevelScalar(guarded.Config.MaxLimit, ref ctx);
+                    if (hr == 0)
+                    {
+                        guarded.CurrentVolume = guarded.Config.MaxLimit;
+                        guarded.IsClampedAlert = true;
+                        RaiseVolumeClamped(guarded, newVol, guarded.Config.MaxLimit);
+                    }
+                    else if (IsRpcErrorCode(hr))
+                    {
+                        TriggerFastResync(guarded.DeviceId);
+                    }
                 }
                 catch (Exception ex)
                 {
                     System.Diagnostics.Debug.WriteLine("Error during volume clamp: " + ex.Message);
+                    if (IsRpcOrComException(ex))
+                    {
+                        TriggerFastResync(guarded.DeviceId);
+                    }
                 }
             }
             else
@@ -316,6 +471,8 @@ namespace EarGuard.Audio
 
             lock (_syncRoot)
             {
+                string deadDeviceId = null;
+
                 foreach (var guarded in _guardedDevices)
                 {
                     if (guarded.VolumeControl == null || guarded.Config == null || !guarded.Config.Enabled)
@@ -331,15 +488,184 @@ namespace EarGuard.Audio
                             if (current > guarded.Config.MaxLimit + 0.001f)
                             {
                                 Guid ctx = ContextGuid;
-                                guarded.VolumeControl.SetMasterVolumeLevelScalar(guarded.Config.MaxLimit, ref ctx);
-                                guarded.CurrentVolume = guarded.Config.MaxLimit;
-                                RaiseVolumeClamped(guarded, current, guarded.Config.MaxLimit);
+                                int shr = guarded.VolumeControl.SetMasterVolumeLevelScalar(guarded.Config.MaxLimit, ref ctx);
+                                if (shr == 0)
+                                {
+                                    guarded.CurrentVolume = guarded.Config.MaxLimit;
+                                    RaiseVolumeClamped(guarded, current, guarded.Config.MaxLimit);
+                                }
+                                else if (IsRpcErrorCode(shr))
+                                {
+                                    deadDeviceId = guarded.DeviceId;
+                                    break;
+                                }
                             }
                         }
+                        else if (IsRpcErrorCode(hr))
+                        {
+                            deadDeviceId = guarded.DeviceId;
+                            break;
+                        }
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        if (IsRpcOrComException(ex))
+                        {
+                            deadDeviceId = guarded.DeviceId;
+                            break;
+                        }
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(deadDeviceId))
+                {
+                    TriggerFastResync(deadDeviceId);
                 }
             }
+        }
+
+        public void HandleSystemResume()
+        {
+            lock (_syncRoot)
+            {
+                if (_isDisposed) return;
+
+                // Instant high-priority clamp on all currently active endpoints
+                foreach (var guarded in _guardedDevices)
+                {
+                    if (guarded.VolumeControl == null || guarded.Config == null || !guarded.Config.Enabled)
+                        continue;
+
+                    try
+                    {
+                        float target = Math.Min(guarded.Config.SafePlugInVol, guarded.Config.MaxLimit);
+                        Guid ctx = ContextGuid;
+                        int hr = guarded.VolumeControl.SetMasterVolumeLevelScalar(target, ref ctx);
+                        if (hr == 0)
+                        {
+                            float oldVol = guarded.CurrentVolume;
+                            guarded.CurrentVolume = target;
+                            if (oldVol > target + 0.001f)
+                            {
+                                RaiseVolumeClamped(guarded, oldVol, target);
+                            }
+                        }
+                        else if (IsRpcErrorCode(hr))
+                        {
+                            TriggerFastResync(guarded.DeviceId);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (IsRpcOrComException(ex))
+                        {
+                            TriggerFastResync(guarded.DeviceId);
+                        }
+                    }
+                }
+
+                // Clear seen devices so that ScanDevices treats re-enumerating endpoints as freshly plugged in
+                _seenDeviceIds.Clear();
+
+                // Run instant scan to detect and clamp re-initialized audio endpoints immediately
+                ScanDevices();
+            }
+        }
+
+        private void TriggerFastResync(string deviceIdToInvalidate = null)
+        {
+            lock (_syncRoot)
+            {
+                if (_isDisposed) return;
+
+                if (!string.IsNullOrEmpty(deviceIdToInvalidate))
+                {
+                    for (int i = _guardedDevices.Count - 1; i >= 0; i--)
+                    {
+                        if (string.Equals(_guardedDevices[i].DeviceId, deviceIdToInvalidate, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _guardedDevices[i].Dispose();
+                            _guardedDevices.RemoveAt(i);
+                            break;
+                        }
+                    }
+                    _seenDeviceIds.Remove(deviceIdToInvalidate);
+                }
+                else
+                {
+                    for (int i = _guardedDevices.Count - 1; i >= 0; i--)
+                    {
+                        var g = _guardedDevices[i];
+                        if (g.VolumeControl == null) continue;
+                        float tmp;
+                        int hr = g.VolumeControl.GetMasterVolumeLevelScalar(out tmp);
+                        if (hr != 0 && IsRpcErrorCode(hr))
+                        {
+                            _seenDeviceIds.Remove(g.DeviceId);
+                            g.Dispose();
+                            _guardedDevices.RemoveAt(i);
+                        }
+                    }
+                }
+            }
+
+            if (Interlocked.CompareExchange(ref _resyncPending, 1, 0) == 0)
+            {
+                PostWork(() =>
+                {
+                    try
+                    {
+                        Thread.Sleep(50);
+                        ScanDevices();
+                    }
+                    finally
+                    {
+                        Interlocked.Exchange(ref _resyncPending, 0);
+                    }
+                });
+            }
+        }
+
+        private void ReinitializeEnumerator()
+        {
+            try
+            {
+                if (_enumerator != null && _notificationClient != null)
+                {
+                    try { _enumerator.UnregisterEndpointNotificationCallback(_notificationClient); } catch { }
+                }
+                if (_enumerator != null)
+                {
+                    try { Marshal.ReleaseComObject(_enumerator); } catch { }
+                    _enumerator = null;
+                }
+                _enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
+                _notificationClient = new AudioNotificationClient(OnHardwareDevicesChanged);
+                _enumerator.RegisterEndpointNotificationCallback(_notificationClient);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("Failed to reinitialize enumerator: " + ex.Message);
+            }
+        }
+
+        public static bool IsRpcErrorCode(int hr)
+        {
+            return hr == CoreAudioConstants.RPC_S_SERVER_UNAVAILABLE
+                || hr == CoreAudioConstants.RPC_E_DISCONNECTED
+                || (uint)hr == 0x88890004  // AUDCLNT_E_DEVICE_INVALIDATED
+                || (uint)hr == 0x80070490; // ERROR_NOT_FOUND
+        }
+
+        public static bool IsRpcOrComException(Exception ex)
+        {
+            if (ex == null) return false;
+            var comEx = ex as COMException;
+            if (comEx != null)
+            {
+                return IsRpcErrorCode(comEx.ErrorCode);
+            }
+            return ex is InvalidComObjectException;
         }
 
         public void TestClamp(GuardedDevice device)
@@ -456,6 +782,21 @@ namespace EarGuard.Audio
                     _watchdogTimer = null;
                 }
 
+                _workerRunning = false;
+                if (_workQueue != null)
+                {
+                    try { _workQueue.CompleteAdding(); } catch { }
+                }
+                if (_workerThread != null && _workerThread.IsAlive)
+                {
+                    _workerThread.Join(500);
+                    _workerThread = null;
+                }
+                if (_workQueue != null)
+                {
+                    try { _workQueue.Dispose(); } catch { }
+                    _workQueue = null;
+                }
                 if (_enumerator != null && _notificationClient != null)
                 {
                     try

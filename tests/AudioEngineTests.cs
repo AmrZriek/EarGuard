@@ -16,6 +16,11 @@ namespace EarGuard.Tests
             Test_SafeSpikeClamp_ExercisesTwoPercentOverCeiling();
             Test_AudioVolumeNotificationData_StructSizeAndOffsets();
             Test_VolumeScalar_PercentageCalculations();
+            Test_WatchdogInterval_ConfiguredTo100Milliseconds();
+            Test_PowerBroadcastConstants_ValidValues();
+            Test_RpcRecovery_DetectionLogic();
+            Test_HandleSystemResume_LocksEndpointsToSafePlugInVolume();
+            Test_MMCSS_WorkerThreadInitializes();
             Console.WriteLine("[PASS] All AudioEngineTests passed!");
         }
 
@@ -148,6 +153,85 @@ namespace EarGuard.Tests
             Assert(Math.Abs(AudioEngine.PercentToScalar(30) - 0.30f) < 0.001f, "30% must be 0.30f scalar");
             Assert(Math.Abs(AudioEngine.PercentToScalar(100) - 1.0f) < 0.001f, "100% must be 1.0f scalar");
             Console.WriteLine("  ✓ Test_VolumeScalar_PercentageCalculations");
+        }
+
+        private static void Test_WatchdogInterval_ConfiguredTo100Milliseconds()
+        {
+            Assert(AudioEngine.WatchdogIntervalMs == 100, "Watchdog interval must be exactly 100ms");
+            Console.WriteLine("  ✓ Test_WatchdogInterval_ConfiguredTo100Milliseconds");
+        }
+
+        private static void Test_PowerBroadcastConstants_ValidValues()
+        {
+            Assert(CoreAudioConstants.WM_POWERBROADCAST == 0x0218, "WM_POWERBROADCAST must be 0x0218");
+            Assert(CoreAudioConstants.PBT_APMRESUMEAUTOMATIC == 0x0012, "PBT_APMRESUMEAUTOMATIC must be 0x0012");
+            Assert(CoreAudioConstants.PBT_APMRESUMESUSPEND == 0x0007, "PBT_APMRESUMESUSPEND must be 0x0007");
+            Assert(CoreAudioConstants.RPC_S_SERVER_UNAVAILABLE == unchecked((int)0x800706BA), "RPC_S_SERVER_UNAVAILABLE must be 0x800706BA");
+            Assert(CoreAudioConstants.RPC_E_DISCONNECTED == unchecked((int)0x80010108), "RPC_E_DISCONNECTED must be 0x80010108");
+            Console.WriteLine("  ✓ Test_PowerBroadcastConstants_ValidValues");
+        }
+
+        private static void Test_RpcRecovery_DetectionLogic()
+        {
+            Assert(AudioEngine.IsRpcErrorCode(CoreAudioConstants.RPC_S_SERVER_UNAVAILABLE), "RPC_S_SERVER_UNAVAILABLE must be recognized as RPC error");
+            Assert(AudioEngine.IsRpcErrorCode(CoreAudioConstants.RPC_E_DISCONNECTED), "RPC_E_DISCONNECTED must be recognized as RPC error");
+            Assert(AudioEngine.IsRpcErrorCode(unchecked((int)0x88890004)), "AUDCLNT_E_DEVICE_INVALIDATED must be recognized as RPC error");
+            Assert(AudioEngine.IsRpcErrorCode(unchecked((int)0x80070490)), "ERROR_NOT_FOUND must be recognized as RPC error");
+            Assert(!AudioEngine.IsRpcErrorCode(0), "S_OK (0) must not be recognized as RPC error");
+
+            var rpcEx = new COMException("RPC Server Unavailable", CoreAudioConstants.RPC_S_SERVER_UNAVAILABLE);
+            Assert(AudioEngine.IsRpcOrComException(rpcEx), "COMException with RPC_S_SERVER_UNAVAILABLE must be detected");
+
+            var discEx = new COMException("Disconnected", CoreAudioConstants.RPC_E_DISCONNECTED);
+            Assert(AudioEngine.IsRpcOrComException(discEx), "COMException with RPC_E_DISCONNECTED must be detected");
+
+            var invalidComEx = new InvalidComObjectException("Invalid COM");
+            Assert(AudioEngine.IsRpcOrComException(invalidComEx), "InvalidComObjectException must be detected");
+
+            var normalEx = new InvalidOperationException("Normal exception");
+            Assert(!AudioEngine.IsRpcOrComException(normalEx), "InvalidOperationException must not be detected as RPC exception");
+            Console.WriteLine("  ✓ Test_RpcRecovery_DetectionLogic");
+        }
+
+        private static void Test_HandleSystemResume_LocksEndpointsToSafePlugInVolume()
+        {
+            var configStore = new ConfigStore();
+            var config = EarGuardConfig.CreateDefault();
+            using (var engine = new AudioEngine(configStore, config))
+            {
+                engine.Start();
+
+                // Trigger system resume event
+                engine.HandleSystemResume();
+
+                // Verify each active guarded endpoint is clamped to its SafePlugInVol (default 5%)
+                foreach (var device in engine.GuardedDevices)
+                {
+                    if (device.Config != null && device.Config.Enabled)
+                    {
+                        int currentPct = AudioEngine.ScalarToPercent(device.CurrentVolume);
+                        int safePlugInPct = AudioEngine.ScalarToPercent(device.Config.SafePlugInVol);
+                        Assert(currentPct <= safePlugInPct + 1,
+                            string.Format("Device {0} volume ({1}%) must be at or below safe plug-in volume ({2}%) after resume",
+                                device.DisplayName, currentPct, safePlugInPct));
+                    }
+                }
+            }
+            Console.WriteLine("  ✓ Test_HandleSystemResume_LocksEndpointsToSafePlugInVolume");
+        }
+
+        private static void Test_MMCSS_WorkerThreadInitializes()
+        {
+            var configStore = new ConfigStore();
+            var config = EarGuardConfig.CreateDefault();
+            using (var engine = new AudioEngine(configStore, config))
+            {
+                engine.Start();
+                // Give the worker thread a moment to initialize MMCSS
+                System.Threading.Thread.Sleep(50);
+                Assert(engine.IsMmcssActive, "MMCSS 'Pro Audio' task must be registered and active on the worker thread");
+            }
+            Console.WriteLine("  ✓ Test_MMCSS_WorkerThreadInitializes");
         }
     }
 }

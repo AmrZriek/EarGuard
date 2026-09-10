@@ -14,6 +14,7 @@ namespace EarGuard.Tests
             {
                 ConfigStoreTests.RunAll();
                 AudioEngineTests.RunAll();
+                TrayIconRecoveryTests.RunAll();
                 EndToEndIntegrationTest.Run();
                 Console.WriteLine();
                 Console.WriteLine("========================================");

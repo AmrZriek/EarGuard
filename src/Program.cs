@@ -24,15 +24,15 @@ namespace EarGuard
             {
                 var configStore = new ConfigStore();
                 var config = configStore.Load();
-                configStore.MigrateStartupRegistryIfNeeded();
+                configStore.MigrateStartupRegistrationIfNeeded(config);
+
+                var app = new Application();
+                app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
                 var audioEngine = new AudioEngine(configStore, config);
                 var trayManager = new TrayManager();
 
                 audioEngine.Start();
-
-                var app = new Application();
-                app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
                 var mainWindow = new MainWindow(configStore, audioEngine, trayManager, singleInstance);
 

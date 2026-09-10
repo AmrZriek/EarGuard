@@ -2,52 +2,77 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Web.Script.Serialization;
-using Microsoft.Win32;
 
 namespace EarGuard.Config
 {
     public class ConfigStore
     {
-        private const string RunRegistryKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        private const string AppRegistryValueName = "EarGuard";
+        private readonly IStartupRegistrar _startupRegistrar;
+        private readonly ILegacyStartupRegistration _legacyStartupRegistration;
+        private readonly string _executablePath;
 
         public string ConfigFilePath { get; private set; }
 
         public ConfigStore()
+            : this(null, null, null)
+        {
+        }
+
+        internal ConfigStore(
+            IStartupRegistrar startupRegistrar,
+            ILegacyStartupRegistration legacyStartupRegistration,
+            string executablePath)
         {
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string earGuardDir = Path.Combine(appData, "EarGuard");
             ConfigFilePath = Path.Combine(earGuardDir, "settings.json");
+            _startupRegistrar = startupRegistrar ?? new TaskSchedulerStartupRegistrar();
+            _legacyStartupRegistration = legacyStartupRegistration ?? new LegacyRunStartupRegistration();
+            _executablePath = executablePath ?? GetCurrentExecutablePath();
+        }
+
+        private static string GetCurrentExecutablePath()
+        {
+            var entryAssembly = System.Reflection.Assembly.GetEntryAssembly();
+            if (entryAssembly != null && !string.IsNullOrEmpty(entryAssembly.Location))
+            {
+                return entryAssembly.Location;
+            }
+
+            return System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
         }
 
         public EarGuardConfig Load(string customPath = null)
         {
             string targetPath = customPath ?? ConfigFilePath;
+            EarGuardConfig config;
             if (!File.Exists(targetPath))
             {
-                var defaultConfig = EarGuardConfig.CreateDefault();
-                EnsureValid(defaultConfig);
-                return defaultConfig;
+                config = EarGuardConfig.CreateDefault();
             }
-
-            try
+            else
             {
-                string json = File.ReadAllText(targetPath);
-                var serializer = new JavaScriptSerializer();
-                var config = serializer.Deserialize<EarGuardConfig>(json);
-                if (config == null)
+                try
+                {
+                    string json = File.ReadAllText(targetPath);
+                    var serializer = new JavaScriptSerializer();
+                    config = serializer.Deserialize<EarGuardConfig>(json) ?? EarGuardConfig.CreateDefault();
+                }
+                catch (Exception)
                 {
                     config = EarGuardConfig.CreateDefault();
                 }
-                EnsureValid(config);
-                return config;
             }
-            catch (Exception)
+
+            // Synchronize the preference with either the current task or the legacy Run registration.
+            bool startupEnabled = _startupRegistrar.IsEnabled() || _legacyStartupRegistration.IsEnabled();
+            if (startupEnabled && !config.LaunchOnStartup)
             {
-                var fallback = EarGuardConfig.CreateDefault();
-                EnsureValid(fallback);
-                return fallback;
+                config.LaunchOnStartup = true;
             }
+
+            EnsureValid(config);
+            return config;
         }
 
         public void Save(EarGuardConfig config, string customPath = null)
@@ -74,9 +99,9 @@ namespace EarGuard.Config
         {
             if (config == null) return;
 
-            // Clamp global limits
+            // Clamp global limits. 30% is the hard safety ceiling; lower user limits remain valid.
             if (config.GlobalMaxLimit < 0.01f) config.GlobalMaxLimit = 0.01f;
-            if (config.GlobalMaxLimit > 1.00f) config.GlobalMaxLimit = 1.00f;
+            if (config.GlobalMaxLimit > 0.30f) config.GlobalMaxLimit = 0.30f;
 
             if (config.GlobalSafePlugInVol < 0.00f) config.GlobalSafePlugInVol = 0.00f;
             if (config.GlobalSafePlugInVol > config.GlobalMaxLimit) config.GlobalSafePlugInVol = config.GlobalMaxLimit;
@@ -89,7 +114,7 @@ namespace EarGuard.Config
             foreach (var dev in config.Devices)
             {
                 if (dev.MaxLimit < 0.01f) dev.MaxLimit = 0.01f;
-                if (dev.MaxLimit > 1.00f) dev.MaxLimit = 1.00f;
+                if (dev.MaxLimit > 0.30f) dev.MaxLimit = 0.30f;
 
                 if (dev.SafePlugInVol < 0.00f) dev.SafePlugInVol = 0.00f;
                 if (dev.SafePlugInVol > dev.MaxLimit) dev.SafePlugInVol = dev.MaxLimit;
@@ -124,62 +149,41 @@ namespace EarGuard.Config
             return newDevice;
         }
 
-        public bool SetStartupRegistry(bool enable)
+        public bool SetStartupEnabled(bool enable)
         {
-            try
+            if (enable)
             {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegistryKey, true))
-                {
-                    if (key == null) return false;
-
-                    if (enable)
-                    {
-                        string exePath = System.Reflection.Assembly.GetEntryAssembly() != null
-                            ? System.Reflection.Assembly.GetEntryAssembly().Location
-                            : System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
-
-                        key.SetValue(AppRegistryValueName, "\"" + exePath + "\" --tray");
-                    }
-                    else
-                    {
-                        if (key.GetValue(AppRegistryValueName) != null)
-                        {
-                            key.DeleteValue(AppRegistryValueName, false);
-                        }
-                    }
-                    return true;
-                }
+                if (!_startupRegistrar.Enable(_executablePath)) return false;
+                return _legacyStartupRegistration.Remove();
             }
-            catch
-            {
-                return false;
-            }
+
+            if (!_startupRegistrar.Disable()) return false;
+            return _legacyStartupRegistration.Remove();
         }
 
-        public void MigrateStartupRegistryIfNeeded()
+        public bool MigrateStartupRegistrationIfNeeded(EarGuardConfig config = null)
         {
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegistryKey, true))
-                {
-                    if (key == null) return;
-                    object val = key.GetValue(AppRegistryValueName);
-                    if (val != null)
-                    {
-                        string strVal = val.ToString();
-                        if (!strVal.Contains("--tray") && !strVal.Contains("--minimized"))
-                        {
-                            string exePath = System.Reflection.Assembly.GetEntryAssembly() != null
-                                ? System.Reflection.Assembly.GetEntryAssembly().Location
-                                : System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+            bool taskEnabled = _startupRegistrar.IsEnabled();
+            bool legacyEnabled = _legacyStartupRegistration.IsEnabled();
+            bool shouldEnable = taskEnabled || legacyEnabled || (config != null && config.LaunchOnStartup);
 
-                            key.SetValue(AppRegistryValueName, "\"" + exePath + "\" --tray");
-                        }
-                    }
-                }
+            if (!shouldEnable) return true;
+            if (!_startupRegistrar.Enable(_executablePath)) return false;
+            if (!_legacyStartupRegistration.Remove()) return false;
+
+            if (config != null)
+            {
+                config.LaunchOnStartup = true;
+                Save(config);
             }
-            catch { }
+
+            return true;
         }
+        public bool IsStartupEnabled()
+        {
+            return _startupRegistrar.IsEnabled() || _legacyStartupRegistration.IsEnabled();
+        }
+
 
         public static bool ShouldStartSilent(string[] args)
         {
@@ -197,22 +201,6 @@ namespace EarGuard.Config
                 }
             }
             return false;
-        }
-
-        public bool IsStartupRegistryEnabled()
-        {
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegistryKey, false))
-                {
-                    if (key == null) return false;
-                    return key.GetValue(AppRegistryValueName) != null;
-                }
-            }
-            catch
-            {
-                return false;
-            }
         }
 
         private static string FormatJson(string json)

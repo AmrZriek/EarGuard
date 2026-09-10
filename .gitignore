@@ -8,6 +8,7 @@ TestRunner.pdb
 *.suo
 *.user
 [0-9a-fA-F]*_EarGuard.exe
+archive/
 
 # OS / Editor files
 .vs/

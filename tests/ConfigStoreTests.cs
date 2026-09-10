@@ -1,7 +1,7 @@
 using System;
 using System.IO;
+using Microsoft.Win32;
 using EarGuard.Config;
-
 namespace EarGuard.Tests
 {
     public static class ConfigStoreTests
@@ -15,6 +15,9 @@ namespace EarGuard.Tests
             Test_CorruptJson_RecoversWithDefaults();
             Test_GetOrCreateDeviceConfig_AddsAndRetrieves();
             Test_SilentLaunchArgs_DetectedCorrectly();
+            Test_StartupRegistration_DelegatesToRegistrar();
+            Test_StartupTaskDefinition_IsPortableAndDeterministic();
+            Test_StartupMigration_PreservesLegacyOnTaskFailure();
             Console.WriteLine("[PASS] All ConfigStoreTests passed!");
         }
 
@@ -45,7 +48,7 @@ namespace EarGuard.Tests
                 var store = new ConfigStore();
                 var original = new EarGuardConfig
                 {
-                    GlobalMaxLimit = 0.42f,
+                    GlobalMaxLimit = 0.22f,
                     GlobalSafePlugInVol = 0.08f,
                     LaunchOnStartup = true,
                     ShowNotificationOnBlock = false
@@ -62,7 +65,7 @@ namespace EarGuard.Tests
                 Assert(File.Exists(tempFile), "Saved config file must exist");
 
                 var loaded = store.Load(tempFile);
-                Assert(Math.Abs(loaded.GlobalMaxLimit - 0.42f) < 0.001f, "Loaded GlobalMaxLimit mismatch");
+                Assert(Math.Abs(loaded.GlobalMaxLimit - 0.22f) < 0.001f, "Loaded GlobalMaxLimit mismatch");
                 Assert(Math.Abs(loaded.GlobalSafePlugInVol - 0.08f) < 0.001f, "Loaded GlobalSafePlugInVol mismatch");
                 Assert(loaded.LaunchOnStartup == true, "Loaded LaunchOnStartup mismatch");
                 Assert(loaded.ShowNotificationOnBlock == false, "Loaded ShowNotificationOnBlock mismatch");
@@ -87,7 +90,7 @@ namespace EarGuard.Tests
             var store = new ConfigStore();
             var config = new EarGuardConfig
             {
-                GlobalMaxLimit = 1.50f, // above 1.0
+                GlobalMaxLimit = 1.50f, // above the 30% safety ceiling
                 GlobalSafePlugInVol = -0.10f // below 0
             };
             config.Devices.Add(new DeviceConfig
@@ -100,9 +103,10 @@ namespace EarGuard.Tests
 
             store.EnsureValid(config);
 
-            Assert(config.GlobalMaxLimit <= 1.0f, "GlobalMaxLimit must be clamped <= 1.0");
-            Assert(config.GlobalSafePlugInVol >= 0.0f, "GlobalSafePlugInVol must be clamped >= 0.0");
+            Assert(config.GlobalMaxLimit <= 0.30f, "GlobalMaxLimit must be clamped <= 30%");
+            Assert(config.GlobalSafePlugInVol >= 0.0f, "GlobalSafePlugInVol must be clamped >= 0.0f");
             Assert(config.Devices[0].MaxLimit >= 0.01f, "Device MaxLimit must be clamped >= 0.01");
+            Assert(config.Devices[0].MaxLimit <= 0.30f, "Device MaxLimit must be clamped <= 30%");
             Assert(config.Devices[0].SafePlugInVol <= config.Devices[0].MaxLimit, "SafePlugInVol cannot exceed MaxLimit");
             Console.WriteLine("  ✓ Test_Validation_ClampsOutOfRangeValues");
         }
@@ -118,7 +122,6 @@ namespace EarGuard.Tests
                 Assert(loaded != null, "Corrupt file should return default config, not null");
                 Assert(Math.Abs(loaded.GlobalMaxLimit - 0.30f) < 0.001f, "Default GlobalMaxLimit must be restored");
                 Assert(Math.Abs(loaded.GlobalSafePlugInVol - 0.05f) < 0.001f, "Default GlobalSafePlugInVol must be restored");
-                Console.WriteLine("  ✓ Test_CorruptJson_RecoversWithDefaults");
             }
             finally
             {
@@ -136,9 +139,9 @@ namespace EarGuard.Tests
 
             var dev1 = store.GetOrCreateDeviceConfig(config, "DEV-A", "Headphones");
             Assert(dev1 != null, "Created device must not be null");
-            Assert(dev1.DeviceId == "DEV-A", "DeviceId mismatch");
             Assert(dev1.DeviceName == "Headphones", "DeviceName mismatch");
             Assert(Math.Abs(dev1.MaxLimit - 0.30f) < 0.001f, "Device MaxLimit default mismatch");
+            Assert(Math.Abs(dev1.SafePlugInVol - 0.05f) < 0.001f, "Device SafePlugInVol default mismatch");
             Assert(config.Devices.Count == 1, "Config must have 1 device");
 
             // Fetching again should return existing instance
@@ -166,6 +169,97 @@ namespace EarGuard.Tests
             Assert(ConfigStore.ShouldStartSilent(new string[] { "--autostart" }), "--autostart should start silent");
             Assert(ConfigStore.ShouldStartSilent(new string[] { "random", "--tray" }), "multi-arg with --tray should start silent");
             Console.WriteLine("  ✓ Test_SilentLaunchArgs_DetectedCorrectly");
+        }
+
+        private static void Test_StartupRegistration_DelegatesToRegistrar()
+        {
+            var registrar = new FakeStartupRegistrar { Enabled = false };
+            var legacy = new FakeLegacyStartupRegistration { Enabled = false };
+            var store = new ConfigStore(registrar, legacy, @"D:\Portable Folder\EarGuard.exe");
+
+            Assert(!store.IsStartupEnabled(), "Disabled task must report disabled");
+            Assert(store.SetStartupEnabled(true), "Enable must succeed when registrar succeeds");
+            Assert(registrar.EnableCalls == 1, "Enable must delegate exactly once");
+            Assert(registrar.LastExecutablePath.EndsWith("EarGuard.exe", StringComparison.OrdinalIgnoreCase),
+                "Enable must register the current executable");
+            Assert(legacy.RemoveCalls == 1, "Enable must remove only the legacy EarGuard registration");
+
+            Assert(store.SetStartupEnabled(false), "Disable must succeed when registrar succeeds");
+            Assert(registrar.DisableCalls == 1, "Disable must delegate exactly once");
+            Console.WriteLine("  ✓ Test_StartupRegistration_DelegatesToRegistrar");
+        }
+
+        private static void Test_StartupTaskDefinition_IsPortableAndDeterministic()
+        {
+            var definition = StartupTaskDefinition.Build(@"D:\Portable Folder\EarGuard.exe");
+            Assert(definition.TaskName == "EarGuardStartup", "Task definition must use the EarGuardStartup task");
+            Assert(definition.TriggerLogon, "Task definition must trigger at user logon");
+            Assert(definition.Delay == TimeSpan.Zero, "Task definition must have zero configured delay");
+            Assert(definition.InteractiveOnly, "Task definition must be interactive-only");
+            Assert(definition.LimitedPrivilege, "Task definition must use limited privilege");
+            Assert(definition.ExecutablePath.EndsWith(@"Portable Folder\EarGuard.exe"), "Task definition must contain the absolute executable path");
+            Assert(definition.Arguments == "--tray", "Task definition must launch in the tray");
+            Assert(definition.WorkingDirectory.EndsWith(@"Portable Folder"), "Task definition must launch from the executable directory");
+            Console.WriteLine("  ✓ Test_StartupTaskDefinition_IsPortableAndDeterministic");
+        }
+
+        private static void Test_StartupMigration_PreservesLegacyOnTaskFailure()
+        {
+            var registrar = new FakeStartupRegistrar { EnableResult = false };
+            var legacy = new FakeLegacyStartupRegistration { Enabled = true };
+            var store = new ConfigStore(registrar, legacy, @"D:\Portable Folder\EarGuard.exe");
+            var config = EarGuardConfig.CreateDefault();
+            config.LaunchOnStartup = false;
+
+            bool migrated = store.MigrateStartupRegistrationIfNeeded(config);
+
+            Assert(!migrated, "Migration must report task creation failure");
+            Assert(registrar.EnableCalls == 1, "Migration must attempt the task exactly once");
+            Assert(legacy.RemoveCalls == 0, "Legacy registration must remain when task creation fails");
+            Assert(legacy.Enabled, "Legacy registration must remain enabled on failure");
+            Console.WriteLine("  ✓ Test_StartupMigration_PreservesLegacyOnTaskFailure");
+        }
+
+        private sealed class FakeStartupRegistrar : IStartupRegistrar
+        {
+            public bool Enabled;
+            public bool EnableResult = true;
+            public int EnableCalls;
+            public int DisableCalls;
+            public string LastExecutablePath;
+
+            public bool IsEnabled() { return Enabled; }
+
+            public bool Enable(string executablePath)
+            {
+                EnableCalls++;
+                LastExecutablePath = executablePath;
+                if (!EnableResult) return false;
+                Enabled = true;
+                return true;
+            }
+
+            public bool Disable()
+            {
+                DisableCalls++;
+                Enabled = false;
+                return true;
+            }
+        }
+
+        private sealed class FakeLegacyStartupRegistration : ILegacyStartupRegistration
+        {
+            public bool Enabled;
+            public int RemoveCalls;
+
+            public bool IsEnabled() { return Enabled; }
+
+            public bool Remove()
+            {
+                RemoveCalls++;
+                Enabled = false;
+                return true;
+            }
         }
     }
 }

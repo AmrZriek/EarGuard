@@ -490,12 +490,19 @@ namespace EarGuard.UI
             footerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
             var settingsStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            bool isStartup = _configStore.IsStartupEnabled();
+            if (_engine.Config.LaunchOnStartup != isStartup)
+            {
+                _engine.Config.LaunchOnStartup = isStartup;
+                _configStore.Save(_engine.Config);
+            }
+
             _startupCheck = new CheckBox
             {
                 Content = "Start EarGuard automatically with Windows",
                 FontSize = 11.5,
                 Foreground = new SolidColorBrush(Color.FromRgb(51, 65, 85)),
-                IsChecked = _engine.Config.LaunchOnStartup,
+                IsChecked = isStartup,
                 Margin = new Thickness(0, 0, 0, 4)
             };
             settingsStack.Children.Add(_startupCheck);
@@ -643,14 +650,14 @@ namespace EarGuard.UI
             _startupCheck.Checked += (s, e) =>
             {
                 _engine.Config.LaunchOnStartup = true;
-                _configStore.SetStartupRegistry(true);
+                _configStore.SetStartupEnabled(true);
                 _configStore.Save(_engine.Config);
             };
 
             _startupCheck.Unchecked += (s, e) =>
             {
                 _engine.Config.LaunchOnStartup = false;
-                _configStore.SetStartupRegistry(false);
+                _configStore.SetStartupEnabled(false);
                 _configStore.Save(_engine.Config);
             };
 
@@ -883,6 +890,15 @@ namespace EarGuard.UI
             {
                 RestoreAndActivate();
                 handled = true;
+            }
+            else if (msg == CoreAudioConstants.WM_POWERBROADCAST)
+            {
+                int powerEvent = wParam.ToInt32();
+                if (powerEvent == CoreAudioConstants.PBT_APMRESUMEAUTOMATIC ||
+                    powerEvent == CoreAudioConstants.PBT_APMRESUMESUSPEND)
+                {
+                    _engine.HandleSystemResume();
+                }
             }
             return IntPtr.Zero;
         }

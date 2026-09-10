@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace EarGuard.Tray
@@ -14,6 +15,8 @@ namespace EarGuard.Tray
 
         private Icon _trayIcon;
         private DateTime _lastBalloonTime = DateTime.MinValue;
+        private TaskbarListener _taskbarListener;
+        private uint _taskbarCreatedMessage;
         public event EventHandler OpenRequested;
         public event EventHandler ExitRequested;
 
@@ -22,6 +25,79 @@ namespace EarGuard.Tray
             InitializeIcon();
             InitializeContextMenu();
             InitializeNotifyIcon();
+            InitializeTaskbarRecovery();
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint RegisterWindowMessage(string lpString);
+
+        private void InitializeTaskbarRecovery()
+        {
+            try
+            {
+                _taskbarCreatedMessage = RegisterWindowMessage("TaskbarCreated");
+                if (_taskbarCreatedMessage == 0) return;
+                _taskbarListener = new TaskbarListener(_taskbarCreatedMessage);
+                _taskbarListener.TaskbarCreated += OnTaskbarCreated;
+            }
+            catch { }
+        }
+
+        private void OnTaskbarCreated()
+        {
+            try
+            {
+                if (_notifyIcon == null) return;
+                TrayIconRecovery.ReaddAfterTaskbarCreated(new NotifyIconAdapter(_notifyIcon));
+            }
+            catch { }
+        }
+
+        private sealed class NotifyIconAdapter : ITrayIconVisibility
+        {
+            private readonly NotifyIcon _icon;
+
+            public NotifyIconAdapter(NotifyIcon icon)
+            {
+                _icon = icon;
+            }
+
+            public bool Visible
+            {
+                get { return _icon.Visible; }
+                set { _icon.Visible = value; }
+            }
+        }
+
+        private sealed class TaskbarListener : NativeWindow, IDisposable
+        {
+            private readonly uint _message;
+            public event Action TaskbarCreated;
+
+            public TaskbarListener(uint message)
+            {
+                _message = message;
+                CreateHandle(new CreateParams());
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                if (m.Msg == _message)
+                {
+                    try
+                    {
+                        if (TaskbarCreated != null) TaskbarCreated();
+                    }
+                    catch { }
+                }
+                base.WndProc(ref m);
+            }
+
+            public void Dispose()
+            {
+                try { DestroyHandle(); }
+                catch { }
+            }
         }
 
         private void InitializeIcon()
@@ -199,6 +275,12 @@ namespace EarGuard.Tray
 
         public void Dispose()
         {
+            if (_taskbarListener != null)
+            {
+                try { _taskbarListener.Dispose(); } catch { }
+                _taskbarListener = null;
+            }
+
             if (_notifyIcon != null)
             {
                 _notifyIcon.Visible = false;

@@ -43,7 +43,7 @@ $references = @(
 if (-not $NoTest) {
     Write-Host "[2/4] Building and executing test suite..." -ForegroundColor Cyan
 
-    $testSources = Get-ChildItem -Path "$baseDir\src\Config\*.cs", "$baseDir\src\Audio\*.cs", "$baseDir\tests\*.cs" | Select-Object -ExpandProperty FullName
+    $testSources = Get-ChildItem -Path "$baseDir\src\Config\*.cs", "$baseDir\src\Audio\*.cs", "$baseDir\src\Tray\TrayIconRecovery.cs", "$baseDir\tests\*.cs" | Select-Object -ExpandProperty FullName
 
     $testArgs = @(
         "/nologo",
@@ -66,11 +66,18 @@ if (-not $NoTest) {
 
     # Clean up test binary to recycle bin
     Add-Type -AssemblyName Microsoft.VisualBasic
-    if (Test-Path "$baseDir\TestRunner.exe") {
-        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("$baseDir\TestRunner.exe", 'OnlyErrorDialogs', 'SendToRecycleBin')
-    }
-    if (Test-Path "$baseDir\TestRunner.pdb") {
-        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("$baseDir\TestRunner.pdb", 'OnlyErrorDialogs', 'SendToRecycleBin')
+    Start-Sleep -Milliseconds 200
+    foreach ($file in @("$baseDir\TestRunner.exe", "$baseDir\TestRunner.pdb")) {
+        if (Test-Path $file) {
+            for ($attempt = 0; $attempt -lt 5; $attempt++) {
+                try {
+                    [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($file, 'OnlyErrorDialogs', 'SendToRecycleBin')
+                    break
+                } catch {
+                    Start-Sleep -Milliseconds 200
+                }
+            }
+        }
     }
 } else {
     Write-Host "[2/4] Skipping tests (-NoTest specified)." -ForegroundColor Yellow

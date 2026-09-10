@@ -127,6 +127,23 @@ namespace EarGuard.Audio
             pid = 14
         };
 
+        // Windows Power Broadcast message & events
+        public const int WM_POWERBROADCAST = 0x0218;
+        public const int PBT_APMRESUMEAUTOMATIC = 0x0012;
+        public const int PBT_APMRESUMESUSPEND = 0x0007;
+
+        // RPC / COM error codes for crash & recovery detection
+        public const int RPC_S_SERVER_UNAVAILABLE = unchecked((int)0x800706BA);
+        public const int RPC_E_DISCONNECTED = unchecked((int)0x80010108);
+
+        // Multimedia Class Scheduler Service (MMCSS)
+        [DllImport("avrt.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern IntPtr AvSetMmThreadCharacteristics(string taskName, ref int taskIndex);
+
+        [DllImport("avrt.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool AvRevertMmThreadCharacteristics(IntPtr avrtHandle);
+
         [DllImport("ole32.dll")]
         public static extern void PropVariantClear(ref PROPVARIANT pvar);
     }
