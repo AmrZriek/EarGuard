@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -8,6 +9,46 @@ namespace EarGuard.Tray
 {
     public class TrayManager : IDisposable
     {
+        // --- Silent notification-area balloon (Shell_NotifyIcon with NIIF_NOSOUND) ---
+        //
+        // The managed NotifyIcon.ShowBalloonTip API always plays the Windows notification sound.
+        // For a hearing-protection tool that sound is itself a hazard: a spike can arrive while the
+        // user is wearing IEMs at a quiet listening level, and the "protection" notice would then be
+        // the loudest thing they hear. NIIF_NOSOUND suppresses it, and the only supported way to set
+        // that flag is to call Shell_NotifyIcon directly.
+        private const int NIM_MODIFY = 0x00000001;
+        private const int NIF_INFO = 0x00000010;
+        private const int NIIF_NONE = 0x00000000;
+        private const int NIIF_NOSOUND = 0x00000010;
+        private const int NIIF_RESPECT_QUIET_TIME = 0x00000080;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct NOTIFYICONDATA
+        {
+            public int cbSize;
+            public IntPtr hWnd;
+            public int uID;
+            public int uFlags;
+            public int uCallbackMessage;
+            public IntPtr hIcon;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string szTip;
+            public int dwState;
+            public int dwStateMask;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+            public string szInfo;
+            public int uTimeoutOrVersion;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
+            public string szInfoTitle;
+            public int dwInfoFlags;
+            public Guid guidItem;
+            public IntPtr hBalloonIcon;
+        }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool Shell_NotifyIcon(int dwMessage, ref NOTIFYICONDATA lpData);
+
         private NotifyIcon _notifyIcon;
         private ContextMenuStrip _contextMenu;
         private ToolStripMenuItem _openMenuItem;
@@ -181,7 +222,7 @@ namespace EarGuard.Tray
             _notifyIcon = new NotifyIcon
             {
                 Icon = _trayIcon,
-                Text = "EarGuard — Active Protection",
+                Text = "EarGuard | Active Protection",
                 Visible = true,
                 ContextMenuStrip = _contextMenu
             };
@@ -204,7 +245,7 @@ namespace EarGuard.Tray
         {
             if (_notifyIcon == null) return;
 
-            string text = string.Format("EarGuard — Protection Active ({0} guarded)", guardedDeviceCount);
+            string text = string.Format("EarGuard | Protection Active ({0} guarded)", guardedDeviceCount);
             if (text.Length > 63) text = text.Substring(0, 63);
             _notifyIcon.Text = text;
         }
@@ -213,20 +254,68 @@ namespace EarGuard.Tray
         {
             if (_notifyIcon == null) return;
 
-            // Rate limit balloon tips to once every 3 seconds to prevent notification spam
+            // Rate limit to once every 3 seconds to prevent notification spam during a volume storm.
             if ((DateTime.Now - _lastBalloonTime).TotalSeconds < 3.0) return;
             _lastBalloonTime = DateTime.Now;
 
-            string title = "EarGuard Volume Clamped";
-            string message = string.Format("Blocked spike on {0}: {1}% → {2}%", deviceName, oldVol, clampedVol);
+            string title = "EarGuard lowered the volume";
+            string message = string.Format(
+                "{0}: lowered {1}% to {2}%.",
+                string.IsNullOrEmpty(deviceName) ? "Your audio device" : deviceName,
+                oldVol,
+                clampedVol);
 
-            _notifyIcon.ShowBalloonTip(3000, title, message, ToolTipIcon.Warning);
+            ShowSilentBalloon(title, message);
         }
 
         public void ShowInfoNotification(string title, string message)
         {
+            ShowSilentBalloon(title, message);
+        }
+
+        /// <summary>
+        /// Displays an informational balloon tip with the system sound suppressed.
+        ///
+        /// If the shell call cannot be made, no balloon is shown at all. Failing loudly would
+        /// defeat the purpose of a tool whose whole job is to keep unexpected sound out of the
+        /// user's ears; the same information is already visible in the main window.
+        /// </summary>
+        private void ShowSilentBalloon(string title, string message)
+        {
             if (_notifyIcon == null) return;
-            _notifyIcon.ShowBalloonTip(2000, title, message, ToolTipIcon.Info);
+
+            try
+            {
+                FieldInfo windowField = typeof(NotifyIcon).GetField(
+                    "window", BindingFlags.NonPublic | BindingFlags.Instance);
+                FieldInfo idField = typeof(NotifyIcon).GetField(
+                    "id", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (windowField == null || idField == null) return;
+
+                var nativeWindow = windowField.GetValue(_notifyIcon) as NativeWindow;
+                if (nativeWindow == null || nativeWindow.Handle == IntPtr.Zero) return;
+
+                var data = new NOTIFYICONDATA();
+                data.cbSize = Marshal.SizeOf(typeof(NOTIFYICONDATA));
+                data.hWnd = nativeWindow.Handle;
+                data.uID = (int)idField.GetValue(_notifyIcon);
+                data.uFlags = NIF_INFO;
+                data.szInfo = Truncate(message, 255);
+                data.szInfoTitle = Truncate(title, 63);
+                data.dwInfoFlags = NIIF_NONE | NIIF_NOSOUND | NIIF_RESPECT_QUIET_TIME;
+
+                Shell_NotifyIcon(NIM_MODIFY, ref data);
+            }
+            catch
+            {
+                // Never let a cosmetic notification failure surface to the user.
+            }
+        }
+
+        private static string Truncate(string value, int maxLength)
+        {
+            if (string.IsNullOrEmpty(value)) return string.Empty;
+            return value.Length <= maxLength ? value : value.Substring(0, maxLength);
         }
 
         private static Icon CreateShieldIcon(Color fillColor, Color symbolColor)

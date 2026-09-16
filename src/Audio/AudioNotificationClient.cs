@@ -6,6 +6,7 @@ namespace EarGuard.Audio
     public class AudioNotificationClient : IMMNotificationClient
     {
         private readonly Action _onDevicesChanged;
+        internal event Action<string> DeviceDisconnected;
 
         public AudioNotificationClient(Action onDevicesChanged)
         {
@@ -15,6 +16,7 @@ namespace EarGuard.Audio
 
         public int OnDeviceStateChanged(string pwstrDeviceId, int dwNewState)
         {
+            if (dwNewState != CoreAudioConstants.DEVICE_STATE_ACTIVE) NotifyDisconnected(pwstrDeviceId);
             TriggerNotification();
             return 0;
         }
@@ -27,6 +29,7 @@ namespace EarGuard.Audio
 
         public int OnDeviceRemoved(string pwstrDeviceId)
         {
+            NotifyDisconnected(pwstrDeviceId);
             TriggerNotification();
             return 0;
         }
@@ -40,6 +43,19 @@ namespace EarGuard.Audio
         public int OnPropertyValueChanged(string pwstrDeviceId, PROPERTYKEY key)
         {
             return 0;
+        }
+
+        private void NotifyDisconnected(string deviceId)
+        {
+            try
+            {
+                var handler = DeviceDisconnected;
+                if (handler != null && !string.IsNullOrEmpty(deviceId)) handler(deviceId);
+            }
+            catch (Exception)
+            {
+                // Isolate COM callback.
+            }
         }
 
         private void TriggerNotification()

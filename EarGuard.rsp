@@ -13,8 +13,8 @@
 /r:PresentationCore.dll
 /r:PresentationFramework.dll
 /r:System.Xaml.dll
-src/Audio/*.cs
-src/Config/*.cs
-src/Tray/*.cs
-src/UI/*.cs
-src/Program.cs
+src\Audio\*.cs
+src\Config\*.cs
+src\Tray\*.cs
+src\UI\*.cs
+src\Program.cs

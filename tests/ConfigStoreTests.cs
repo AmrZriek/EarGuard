@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Collections.Generic;
+using System.Threading;
 using Microsoft.Win32;
 using EarGuard.Config;
 namespace EarGuard.Tests
@@ -12,6 +14,10 @@ namespace EarGuard.Tests
             Test_DefaultConfig_HasSafeInvariants();
             Test_SerializationAndDeserialization_RoundTrips();
             Test_Validation_ClampsOutOfRangeValues();
+            Test_Validation_HonorsUserChosenCeilingUpTo100Percent();
+            Test_Validation_NormalizesNonFiniteCeilings();
+            Test_Validation_RemovesNullDeviceEntries();
+            Test_ConcurrentSaveAndDeviceAddition_RoundTrips();
             Test_CorruptJson_RecoversWithDefaults();
             Test_GetOrCreateDeviceConfig_AddsAndRetrieves();
             Test_SilentLaunchArgs_DetectedCorrectly();
@@ -90,7 +96,7 @@ namespace EarGuard.Tests
             var store = new ConfigStore();
             var config = new EarGuardConfig
             {
-                GlobalMaxLimit = 1.50f, // above the 30% safety ceiling
+                GlobalMaxLimit = 1.50f, // above the legal 100% maximum
                 GlobalSafePlugInVol = -0.10f // below 0
             };
             config.Devices.Add(new DeviceConfig
@@ -103,12 +109,53 @@ namespace EarGuard.Tests
 
             store.EnsureValid(config);
 
-            Assert(config.GlobalMaxLimit <= 0.30f, "GlobalMaxLimit must be clamped <= 30%");
+            Assert(config.GlobalMaxLimit <= 1.0f, "GlobalMaxLimit must be clamped <= 100%");
             Assert(config.GlobalSafePlugInVol >= 0.0f, "GlobalSafePlugInVol must be clamped >= 0.0f");
             Assert(config.Devices[0].MaxLimit >= 0.01f, "Device MaxLimit must be clamped >= 0.01");
-            Assert(config.Devices[0].MaxLimit <= 0.30f, "Device MaxLimit must be clamped <= 30%");
+            Assert(config.Devices[0].MaxLimit <= 1.0f, "Device MaxLimit must be clamped <= 100%");
             Assert(config.Devices[0].SafePlugInVol <= config.Devices[0].MaxLimit, "SafePlugInVol cannot exceed MaxLimit");
             Console.WriteLine("  ✓ Test_Validation_ClampsOutOfRangeValues");
+        }
+
+        private static void Test_Validation_HonorsUserChosenCeilingUpTo100Percent()
+        {
+            // Regression guard: validation used to silently snap every ceiling down to 30%,
+            // so the UI showed one value while the engine enforced another.
+            var store = new ConfigStore();
+            var config = EarGuardConfig.CreateDefault();
+            config.GlobalMaxLimit = 0.75f;
+            config.Devices.Add(new DeviceConfig
+            {
+                DeviceId = "DEV-75",
+                DeviceName = "Loud but intentional",
+                MaxLimit = 0.75f,
+                SafePlugInVol = 0.05f
+            });
+
+            store.EnsureValid(config);
+
+            Assert(Math.Abs(config.GlobalMaxLimit - 0.75f) < 0.0001f,
+                "A 75% global ceiling must be preserved exactly");
+            Assert(Math.Abs(config.Devices[0].MaxLimit - 0.75f) < 0.0001f,
+                "A 75% per-device ceiling must be preserved exactly");
+
+            string tempFile = Path.Combine(Path.GetTempPath(), "EarGuard_Test_Ceiling_" + Guid.NewGuid() + ".json");
+            try
+            {
+                store.Save(config, tempFile);
+                var loaded = store.Load(tempFile);
+                Assert(Math.Abs(loaded.Devices[0].MaxLimit - 0.75f) < 0.0001f,
+                    "A saved 75% ceiling must survive a save/load round trip unchanged");
+            }
+            finally
+            {
+                if (File.Exists(tempFile))
+                {
+                    try { File.Delete(tempFile); } catch { }
+                }
+            }
+
+            Console.WriteLine("  ✓ Test_Validation_HonorsUserChosenCeilingUpTo100Percent");
         }
 
         private static void Test_CorruptJson_RecoversWithDefaults()
@@ -149,6 +196,128 @@ namespace EarGuard.Tests
             Assert(object.ReferenceEquals(dev1, dev1Again), "Subsequent retrieval must return identical instance");
             Assert(config.Devices.Count == 1, "Config must still have 1 device");
             Console.WriteLine("  ✓ Test_GetOrCreateDeviceConfig_AddsAndRetrieves");
+        }
+
+        private static void Test_Validation_NormalizesNonFiniteCeilings()
+        {
+            var store = new ConfigStore();
+            float[] values = { float.NegativeInfinity, float.NaN, float.PositiveInfinity };
+            float[] expected = { 0.01f, 0.01f, 1.0f };
+            for (int i = 0; i < values.Length; i++)
+            {
+                var config = EarGuardConfig.CreateDefault();
+                config.GlobalMaxLimit = values[i];
+                config.GlobalSafePlugInVol = 0.5f;
+                config.Devices.Add(new DeviceConfig
+                {
+                    DeviceId = "NONFINITE",
+                    MaxLimit = values[i],
+                    SafePlugInVol = 0.5f
+                });
+
+                store.EnsureValid(config);
+
+                Assert(config.GlobalMaxLimit == expected[i],
+                    "Global non-finite ceiling must clamp safely: " + values[i]);
+                Assert(config.Devices[0].MaxLimit == expected[i],
+                    "Device non-finite ceiling must clamp safely: " + values[i]);
+                Assert(config.GlobalSafePlugInVol == Math.Min(0.5f, expected[i]),
+                    "Global plug-in volume must obey the normalized ceiling");
+                Assert(config.Devices[0].SafePlugInVol == Math.Min(0.5f, expected[i]),
+                    "Device plug-in volume must obey the normalized ceiling");
+            }
+        }
+
+        private static void Test_Validation_RemovesNullDeviceEntries()
+        {
+            var store = new ConfigStore();
+            string tempFile = Path.Combine(Path.GetTempPath(), "EarGuard_Test_Nulls_" + Guid.NewGuid() + ".json");
+            try
+            {
+                File.WriteAllText(tempFile,
+                    "{\"Devices\":[null,{\"DeviceId\":\"KEEP\",\"DeviceName\":\"Desk DAC\",\"MaxLimit\":0.5},null]}");
+                var config = store.Load(tempFile);
+                Assert(config.Devices.Count == 1 && config.Devices[0].DeviceId == "KEEP",
+                    "Loading must remove null entries while preserving valid devices");
+                var existing = store.GetOrCreateDeviceConfig(config, "keep", "Renamed DAC");
+                Assert(existing.DeviceName == "Renamed DAC" && config.Devices.Count == 1,
+                    "Device lookup must find the surviving device case-insensitively");
+                store.GetOrCreateDeviceConfig(config, "NEW", "New DAC");
+                store.Save(config, tempFile);
+                var loaded = store.Load(tempFile);
+                Assert(loaded.Devices.Count == 2 && loaded.Devices.TrueForAll(d => d != null),
+                    "Normalized devices and a subsequent addition must survive save/load");
+            }
+            finally
+            {
+                if (File.Exists(tempFile)) File.Delete(tempFile);
+            }
+        }
+
+        private static void Test_ConcurrentSaveAndDeviceAddition_RoundTrips()
+        {
+            var store = new ConfigStore();
+            var config = EarGuardConfig.CreateDefault();
+            config.GlobalMaxLimit = 0.75f;
+            string tempFile = Path.Combine(Path.GetTempPath(), "EarGuard_Test_Concurrent_" + Guid.NewGuid() + ".json");
+            const int deviceCount = 64;
+            var errors = new Exception[3];
+            var workers = new Thread[3];
+            using (var start = new ManualResetEvent(false))
+            {
+                try
+                {
+                    for (int worker = 0; worker < workers.Length; worker++)
+                    {
+                        int index = worker;
+                        workers[index] = new Thread(() =>
+                        {
+                            try
+                            {
+                                start.WaitOne();
+                                for (int i = 0; i < deviceCount; i++)
+                                {
+                                    // Two scanners discover the same IDs while a third worker
+                                    // saves. No caller field writes are made during the race.
+                                    if (index != 0)
+                                        store.GetOrCreateDeviceConfig(config, "DEV-" + i, "Device " + i);
+                                    store.Save(config, tempFile);
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                errors[index] = ex;
+                            }
+                        });
+                        workers[index].Start();
+                    }
+                    start.Set();
+                    foreach (var worker in workers) worker.Join();
+                    foreach (var error in errors)
+                        if (error != null) throw new Exception("Concurrent store operation failed", error);
+
+                    // Do not save again here: that could conceal an older in-flight save
+                    // overwriting a newer device list after the scanners finish.
+                    var loaded = store.Load(tempFile);
+                    Assert(loaded.Devices.Count == deviceCount,
+                        "Concurrent saves must persist every discovered device exactly once");
+                    var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var device in loaded.Devices)
+                    {
+                        Assert(ids.Add(device.DeviceId), "Concurrent discovery must not duplicate devices");
+                        Assert(device.MaxLimit == 0.75f, "Discovered devices must retain the chosen ceiling");
+                    }
+                    for (int i = 0; i < deviceCount; i++)
+                        Assert(ids.Contains("DEV-" + i), "Saved settings must retain discovered device " + i);
+                }
+                finally
+                {
+                    start.Set();
+                    foreach (var worker in workers)
+                        if (worker != null && worker.IsAlive) worker.Join();
+                    if (File.Exists(tempFile)) File.Delete(tempFile);
+                }
+            }
         }
 
         private static void Test_SilentLaunchArgs_DetectedCorrectly()

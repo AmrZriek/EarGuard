@@ -21,10 +21,72 @@ namespace EarGuard.Audio
         }
     }
 
+    /// <summary>
+    /// Describes what a volume adjustment attempt actually did.
+    /// </summary>
+    public enum VolumeAdjustmentOutcome
+    {
+        /// <summary>The endpoint was already at or below the target, so nothing was changed.</summary>
+        AlreadySafe,
+        /// <summary>The endpoint was louder than the target and was lowered.</summary>
+        Lowered,
+        /// <summary>The endpoint is not guarded, so it was deliberately left untouched.</summary>
+        Skipped,
+        /// <summary>The endpoint was invalidated and recovery was requested.</summary>
+        RecoveryRequested,
+        /// <summary>The hardware state or write result is unknown; retry without invalidating.</summary>
+        Failed
+    }
+
+    public struct VolumeAdjustmentResult
+    {
+        // Explicit readonly fields rather than auto-properties: the C# 5 compiler shipped with
+        // .NET Framework cannot assign an auto-property backing field inside a struct constructor
+        // (CS0843), and the documented no-build-tools path compiles this file with that compiler.
+        private readonly VolumeAdjustmentOutcome _outcome;
+        private readonly float _oldVolume;
+        private readonly float _newVolume;
+
+        public VolumeAdjustmentOutcome Outcome { get { return _outcome; } }
+        public float OldVolume { get { return _oldVolume; } }
+        public float NewVolume { get { return _newVolume; } }
+
+        public VolumeAdjustmentResult(VolumeAdjustmentOutcome outcome, float oldVolume, float newVolume)
+        {
+            _outcome = outcome;
+            _oldVolume = oldVolume;
+            _newVolume = newVolume;
+        }
+    }
+
     public class AudioEngine : IDisposable
     {
         public static readonly Guid ContextGuid = Guid.NewGuid();
         public const int WatchdogIntervalMs = 100;
+
+        /// <summary>
+        /// How long after a plug-in EarGuard keeps holding the endpoint at the safe plug-in limit.
+        ///
+        /// Windows restores a reconnected endpoint's previous volume shortly after it appears, so a
+        /// single application at detection time gets overwritten. This window lets the plug-in limit
+        /// survive that restore. It is deliberately a cap, never a target: if the endpoint is quieter
+        /// than the limit, EarGuard still does nothing.
+        /// </summary>
+        public const int SafePlugInGraceMs = 3000;
+
+        /// <summary>
+        /// How often discovery retries run while waiting for a freshly reported endpoint to appear.
+        ///
+        /// Retries exist because Windows finishes re-indexing a USB endpoint slightly after it
+        /// raises the notification. The interval is deliberately coarser than the watchdog, which
+        /// already re-caps attached endpoints every <see cref="WatchdogIntervalMs"/>. Retries also
+        /// stop as soon as a scan finds the endpoint set unchanged, so one device change costs a
+        /// couple of scans instead of one per tick.
+        /// </summary>
+        public const int DiscoveryRetryIntervalMs = 500;
+
+        // Tolerance used when deciding whether a write is even necessary.
+        private const float VolumeEpsilon = 0.0001f;
 
         private readonly ConfigStore _configStore;
         private readonly EarGuardConfig _config;
@@ -35,12 +97,17 @@ namespace EarGuard.Audio
         private IMMDeviceEnumerator _enumerator;
         private AudioNotificationClient _notificationClient;
         private Timer _watchdogTimer;
+        private Timer _discoveryTimer;
+        private DateTime _discoveryUntilUtc;
+        private bool _structureChangedSincePublish;
+        private int _discoveryObservedChange;
         private Thread _workerThread;
         private BlockingCollection<Action> _workQueue;
         private volatile bool _workerRunning;
         private IntPtr _mmcssHandle = IntPtr.Zero;
         private int _resyncPending;
         private bool _isDisposed;
+        private string _defaultDeviceId = string.Empty;
 
         [ThreadStatic]
         private static bool t_isMmcssRegistered;
@@ -62,6 +129,22 @@ namespace EarGuard.Audio
                 lock (_syncRoot)
                 {
                     return _guardedDevices.ToArray();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Device id of the system's current default playback endpoint, or an empty string when it
+        /// cannot be determined. Used by the UI so the window opens on the device the user actually
+        /// hears rather than whichever endpoint happens to enumerate first.
+        /// </summary>
+        public string DefaultDeviceId
+        {
+            get
+            {
+                lock (_syncRoot)
+                {
+                    return _defaultDeviceId;
                 }
             }
         }
@@ -95,6 +178,7 @@ namespace EarGuard.Audio
                 {
                     _enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
                     _notificationClient = new AudioNotificationClient(OnHardwareDevicesChanged);
+                    _notificationClient.DeviceDisconnected += OnDeviceDisconnected;
                     _enumerator.RegisterEndpointNotificationCallback(_notificationClient);
                 }
                 catch (Exception ex)
@@ -171,6 +255,20 @@ namespace EarGuard.Audio
             catch { }
         }
 
+        /// <summary>
+        /// Releases a COM object without letting a release failure escape.
+        ///
+        /// ReleaseComObject throws when the reference is not a COM object, and it is called while
+        /// iterating discovered endpoints. An exception there would abort the rest of the scan and
+        /// skip device removal, leaving endpoints guarded after they have gone away, so release
+        /// failures are swallowed to keep scan progress intact.
+        /// </summary>
+        private static void SafeReleaseComObject(object comObject)
+        {
+            if (comObject == null) return;
+            try { Marshal.ReleaseComObject(comObject); } catch (ArgumentException) { }
+        }
+
         private static void EnsureThreadMmcss()
         {
             if (t_isMmcssRegistered) return;
@@ -189,6 +287,12 @@ namespace EarGuard.Audio
             lock (_syncRoot)
             {
                 if (_enumerator == null || _isDisposed) return;
+
+                // Set when the guarded set itself changes: an endpoint attaches, or one goes away.
+                // Volume-only re-capping happens on every scan but must not be published, otherwise
+                // each scan rewrites settings.json and rebuilds the UI device list.
+                bool structureChanged = false;
+                bool defaultChanged = false;
 
                 IMMDeviceCollection col = null;
                 try
@@ -213,6 +317,11 @@ namespace EarGuard.Audio
                     }
 
                     if (col == null) return;
+
+                    string defaultIdBefore = _defaultDeviceId;
+                    RefreshDefaultDeviceId();
+                    defaultChanged = !string.Equals(defaultIdBefore, _defaultDeviceId, StringComparison.OrdinalIgnoreCase);
+
                     uint count = 0;
                     col.GetCount(out count);
 
@@ -228,7 +337,7 @@ namespace EarGuard.Audio
                         dev.GetId(out devId);
                         if (string.IsNullOrEmpty(devId))
                         {
-                            Marshal.ReleaseComObject(dev);
+                            SafeReleaseComObject(dev);
                             continue;
                         }
 
@@ -238,37 +347,23 @@ namespace EarGuard.Audio
                         var existing = _guardedDevices.Find(d => string.Equals(d.DeviceId, devId, StringComparison.OrdinalIgnoreCase));
                         if (existing != null)
                         {
-                            Marshal.ReleaseComObject(dev);
-                            if (existing.VolumeControl != null && existing.Config != null && existing.Config.Enabled)
+                            SafeReleaseComObject(dev);
+                            if (_seenDeviceIds.Add(devId))
                             {
-                                try
-                                {
-                                    float existingVol = 0f;
-                                    int ehr = existing.VolumeControl.GetMasterVolumeLevelScalar(out existingVol);
-                                    if (ehr == 0)
-                                    {
-                                        existing.CurrentVolume = existingVol;
-                                        if (existingVol > existing.Config.MaxLimit + 0.0001f)
-                                        {
-                                            Guid ctx = ContextGuid;
-                                            existing.VolumeControl.SetMasterVolumeLevelScalar(existing.Config.MaxLimit, ref ctx);
-                                            float oldVol = existing.CurrentVolume;
-                                            existing.CurrentVolume = existing.Config.MaxLimit;
-                                            RaiseVolumeClamped(existing, oldVol, existing.Config.MaxLimit);
-                                        }
-                                    }
-                                    else if (IsRpcErrorCode(ehr))
-                                    {
-                                        TriggerFastResync(existing.DeviceId);
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    if (IsRpcOrComException(ex))
-                                    {
-                                        TriggerFastResync(existing.DeviceId);
-                                    }
-                                }
+                                existing.SafePlugInUntilUtc = DateTime.UtcNow.AddMilliseconds(SafePlugInGraceMs);
+                            }
+
+                            // Inside the plug-in grace window, hold the endpoint at the safe plug-in
+                            // limit so Windows' restore of the previous volume cannot undo it. Outside
+                            // the window, re-assert the ceiling. Both are caps and can only lower volume.
+                            float existingTarget = IsWithinSafePlugInWindow(existing)
+                                ? Math.Min(existing.Config.SafePlugInVol, existing.Config.MaxLimit)
+                                : existing.Config.MaxLimit;
+
+                            var existingOutcome = ApplyVolumeCeiling(existing, existingTarget);
+                            if (existingOutcome.Outcome == VolumeAdjustmentOutcome.Lowered)
+                            {
+                                RaiseVolumeClamped(existing, existingOutcome.OldVolume, existingOutcome.NewVolume);
                             }
                             continue;
                         }
@@ -310,7 +405,7 @@ namespace EarGuard.Audio
 
                         if (actHr != 0 || vol == null)
                         {
-                            Marshal.ReleaseComObject(dev);
+                            SafeReleaseComObject(dev);
                             continue;
                         }
 
@@ -324,42 +419,41 @@ namespace EarGuard.Audio
                             Config = devConfig
                         };
 
-                        // Query initial volume
+                        // Read the current hardware level so the UI shows a real value before any
+                        // adjustment is attempted.
                         float curVol = 0f;
                         int ghr = vol.GetMasterVolumeLevelScalar(out curVol);
-                        if (ghr == 0)
+                        if (ghr == 0 && !float.IsNaN(curVol) && !float.IsInfinity(curVol))
                         {
                             guarded.CurrentVolume = curVol;
                         }
 
-
-                        // Fresh plug-in enforcement: if newly connected, apply safe plug-in volume
+                        // Freshly connected endpoints are capped at the safe plug-in level, and stay
+                        // capped for a short grace window so Windows' restore of the previous volume
+                        // cannot silently undo it. Endpoints we already knew about are re-capped at
+                        // their ceiling. Both are caps, not targets: if the hardware comes up quieter
+                        // than the cap, it is left alone.
                         bool isNewDevice = !_seenDeviceIds.Contains(devId);
                         _seenDeviceIds.Add(devId);
 
                         if (isNewDevice)
                         {
-                            if (devConfig.Enabled)
-                            {
-                                try
-                                {
-                                    Guid ctx = ContextGuid;
-                                    vol.SetMasterVolumeLevelScalar(devConfig.SafePlugInVol, ref ctx);
-                                    guarded.CurrentVolume = devConfig.SafePlugInVol;
-                                }
-                                catch { }
-                            }
+                            guarded.SafePlugInUntilUtc = DateTime.UtcNow.AddMilliseconds(SafePlugInGraceMs);
                         }
-                        else if (ShouldClampVolume(devConfig.Enabled, curVol, devConfig.MaxLimit, Guid.Empty, ContextGuid))
+
+                        float scanTarget = isNewDevice
+                            ? Math.Min(devConfig.SafePlugInVol, devConfig.MaxLimit)
+                            : devConfig.MaxLimit;
+
+                        var scanOutcome = ApplyVolumeCeiling(guarded, scanTarget);
+                        if (scanOutcome.Outcome == VolumeAdjustmentOutcome.RecoveryRequested)
                         {
-                            // Initial volume exceeds ceiling, clamp immediately!
-                            try
-                            {
-                                Guid ctx = ContextGuid;
-                                vol.SetMasterVolumeLevelScalar(devConfig.MaxLimit, ref ctx);
-                                guarded.CurrentVolume = devConfig.MaxLimit;
-                            }
-                            catch { }
+                            guarded.Dispose();
+                            continue;
+                        }
+                        if (scanOutcome.Outcome == VolumeAdjustmentOutcome.Lowered)
+                        {
+                            RaiseVolumeClamped(guarded, scanOutcome.OldVolume, scanOutcome.NewVolume);
                         }
 
                         // Register COM volume callback
@@ -368,27 +462,39 @@ namespace EarGuard.Audio
                         vol.RegisterControlChangeNotify(callback);
 
                         _guardedDevices.Add(guarded);
+                        structureChanged = true;
                     }
 
-                    // Remove any devices that were disconnected
+                    // Remove any devices that were disconnected.
+                    // The seen-device set must be pruned in lockstep, otherwise it grows without
+                    // bound and, worse, a device that is re-attached later is still considered
+                    // "already known" and would miss its safe plug-in treatment.
                     for (int i = _guardedDevices.Count - 1; i >= 0; i--)
                     {
                         var g = _guardedDevices[i];
                         if (!currentActiveIds.Contains(g.DeviceId))
                         {
+                            _seenDeviceIds.Remove(g.DeviceId);
                             g.Dispose();
                             _guardedDevices.RemoveAt(i);
+                            structureChanged = true;
                         }
                     }
                 }
                 finally
                 {
-                    if (col != null)
-                    {
-                        Marshal.ReleaseComObject(col);
-                    }
+                    SafeReleaseComObject(col);
                 }
 
+                _structureChangedSincePublish |= structureChanged;
+                if (structureChanged)
+                    Interlocked.Exchange(ref _discoveryObservedChange, 1);
+
+                // Publish only when the device set or the default endpoint actually changed. A scan
+                // that merely re-asserted existing caps has nothing new to tell anyone.
+                if (!_structureChangedSincePublish && !defaultChanged) return;
+
+                _structureChangedSincePublish = false;
                 _configStore.Save(_config);
                 RaiseDevicesChanged();
             }
@@ -396,18 +502,91 @@ namespace EarGuard.Audio
 
         private void OnHardwareDevicesChanged()
         {
-            // Scan immediately so a newly enumerated endpoint is clamped before playback.
-            // Retry once after AudioSrv finishes any USB re-indexing race.
+            // One work item keeps the ordering explicit: open the retry window, then scan. If that
+            // scan finds the endpoint Windows was re-indexing, the next tick stops retrying.
+            // Attached endpoints are already protected by the watchdog throughout the grace window,
+            // so nothing here may sleep on the sole recovery worker.
             PostWork(() =>
             {
+                if (_isDisposed) return;
+
+                Interlocked.Exchange(ref _discoveryObservedChange, 0);
+
+                lock (_syncRoot)
+                {
+                    if (_isDisposed) return;
+                    _discoveryUntilUtc = DateTime.UtcNow.AddMilliseconds(SafePlugInGraceMs);
+                    if (_discoveryTimer == null)
+                        _discoveryTimer = new Timer(DiscoveryRetryTick, null, DiscoveryRetryIntervalMs, DiscoveryRetryIntervalMs);
+                    else
+                        _discoveryTimer.Change(DiscoveryRetryIntervalMs, DiscoveryRetryIntervalMs);
+                }
+
                 ScanDevices();
-                Thread.Sleep(100);
-                ScanDevices();
+            });
+        }
+
+        private void DiscoveryRetryTick(object state)
+        {
+            // Stop once a scan has already reported a change: the endpoint has appeared, and the
+            // watchdog covers it from here. Otherwise keep retrying until the window closes.
+            if (Interlocked.CompareExchange(ref _discoveryObservedChange, 1, 1) == 1)
+            {
+                StopDiscoveryRetries();
+                return;
+            }
+
+            lock (_syncRoot)
+            {
+                if (_isDisposed) return;
+                if (DateTime.UtcNow >= _discoveryUntilUtc)
+                {
+                    StopDiscoveryRetries();
+                    return;
+                }
+            }
+
+            ScanDevices();
+        }
+
+        private void StopDiscoveryRetries()
+        {
+            lock (_syncRoot)
+            {
+                if (_discoveryTimer != null)
+                    _discoveryTimer.Change(Timeout.Infinite, Timeout.Infinite);
+            }
+        }
+
+        private void OnDeviceDisconnected(string deviceId)
+        {
+            // Retain the transition even if removal/reconnection both precede enumeration.
+            // Do not take the engine lock on the COM notification thread.
+            PostWork(() =>
+            {
+                lock (_syncRoot)
+                {
+                    _seenDeviceIds.Remove(deviceId);
+                    var existing = _guardedDevices.Find(d => string.Equals(d.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+                    if (existing != null)
+                        existing.SafePlugInUntilUtc = DateTime.UtcNow.AddMilliseconds(SafePlugInGraceMs);
+                }
             });
         }
 
         private void HandleVolumeNotification(GuardedDevice guarded, AUDIO_VOLUME_NOTIFICATION_DATA data)
         {
+            // Core Audio may deliver a callback while a setter/unregister call is waiting.
+            // Never block that COM thread on our writer lock; defer contention to the worker.
+            // Own echoes need no work: the successful writer publishes the new level itself.
+            if (data.guidEventContext == ContextGuid) return;
+            if (!Monitor.TryEnter(_syncRoot))
+            {
+                PostWork(() => HandleVolumeNotification(guarded, data));
+                return;
+            }
+            try
+            {
             if (_isDisposed || guarded == null || guarded.Config == null) return;
 
             // Prioritize incoming COM callback thread under Pro-Audio MMCSS
@@ -415,46 +594,29 @@ namespace EarGuard.Audio
 
             float newVol = data.fMasterVolume;
 
-            // Check if this event was initiated by our own clamp
-            if (data.guidEventContext == ContextGuid)
-            {
-                guarded.CurrentVolume = newVol;
-                RaiseVolumeChanged(guarded);
-                return;
-            }
+            if (float.IsNaN(newVol) || float.IsInfinity(newVol)) return;
+
+            // While a freshly plugged endpoint is inside its grace window, the effective limit is the
+            // safe plug-in limit, so a late Windows volume restore is pulled straight back down
+            // instead of waiting for the next watchdog tick.
+            float effectiveLimit = IsWithinSafePlugInWindow(guarded)
+                ? Math.Min(guarded.Config.SafePlugInVol, guarded.Config.MaxLimit)
+                : guarded.Config.MaxLimit;
 
             bool shouldClamp = ShouldClampVolume(
                 guarded.Config.Enabled,
                 newVol,
-                guarded.Config.MaxLimit,
+                effectiveLimit,
                 data.guidEventContext,
                 ContextGuid
             );
             if (shouldClamp)
             {
-                // Immediate clamp!
-                try
+                // Immediate downward-only clamp through the single guarded write path.
+                var outcome = ApplyVolumeCeiling(guarded, effectiveLimit);
+                if (outcome.Outcome == VolumeAdjustmentOutcome.Lowered)
                 {
-                    Guid ctx = ContextGuid;
-                    int hr = guarded.VolumeControl.SetMasterVolumeLevelScalar(guarded.Config.MaxLimit, ref ctx);
-                    if (hr == 0)
-                    {
-                        guarded.CurrentVolume = guarded.Config.MaxLimit;
-                        guarded.IsClampedAlert = true;
-                        RaiseVolumeClamped(guarded, newVol, guarded.Config.MaxLimit);
-                    }
-                    else if (IsRpcErrorCode(hr))
-                    {
-                        TriggerFastResync(guarded.DeviceId);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine("Error during volume clamp: " + ex.Message);
-                    if (IsRpcOrComException(ex))
-                    {
-                        TriggerFastResync(guarded.DeviceId);
-                    }
+                    RaiseVolumeClamped(guarded, outcome.OldVolume, outcome.NewVolume);
                 }
             }
             else
@@ -463,6 +625,16 @@ namespace EarGuard.Audio
             }
 
             RaiseVolumeChanged(guarded);
+            }
+            finally
+            {
+                Monitor.Exit(_syncRoot);
+            }
+        }
+
+        private static bool IsWithinSafePlugInWindow(GuardedDevice device)
+        {
+            return device != null && DateTime.UtcNow < device.SafePlugInUntilUtc;
         }
 
         private void WatchdogTick(object state)
@@ -471,56 +643,25 @@ namespace EarGuard.Audio
 
             lock (_syncRoot)
             {
-                string deadDeviceId = null;
-
-                foreach (var guarded in _guardedDevices)
+                for (int i = _guardedDevices.Count - 1; i >= 0; i--)
                 {
+                    var guarded = _guardedDevices[i];
                     if (guarded.VolumeControl == null || guarded.Config == null || !guarded.Config.Enabled)
                         continue;
 
-                    try
+                    // Hold freshly plugged endpoints at the plug-in limit for the grace window so a
+                    // late Windows volume restore cannot lift them back up to their old level.
+                    float target = IsWithinSafePlugInWindow(guarded)
+                        ? Math.Min(guarded.Config.SafePlugInVol, guarded.Config.MaxLimit)
+                        : guarded.Config.MaxLimit;
+
+                    var outcome = ApplyVolumeCeiling(guarded, target);
+                    if (outcome.Outcome == VolumeAdjustmentOutcome.Lowered)
                     {
-                        float current = 0f;
-                        int hr = guarded.VolumeControl.GetMasterVolumeLevelScalar(out current);
-                        if (hr == 0)
-                        {
-                            guarded.CurrentVolume = current;
-                            if (current > guarded.Config.MaxLimit + 0.001f)
-                            {
-                                Guid ctx = ContextGuid;
-                                int shr = guarded.VolumeControl.SetMasterVolumeLevelScalar(guarded.Config.MaxLimit, ref ctx);
-                                if (shr == 0)
-                                {
-                                    guarded.CurrentVolume = guarded.Config.MaxLimit;
-                                    RaiseVolumeClamped(guarded, current, guarded.Config.MaxLimit);
-                                }
-                                else if (IsRpcErrorCode(shr))
-                                {
-                                    deadDeviceId = guarded.DeviceId;
-                                    break;
-                                }
-                            }
-                        }
-                        else if (IsRpcErrorCode(hr))
-                        {
-                            deadDeviceId = guarded.DeviceId;
-                            break;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        if (IsRpcOrComException(ex))
-                        {
-                            deadDeviceId = guarded.DeviceId;
-                            break;
-                        }
+                        RaiseVolumeClamped(guarded, outcome.OldVolume, outcome.NewVolume);
                     }
                 }
 
-                if (!string.IsNullOrEmpty(deadDeviceId))
-                {
-                    TriggerFastResync(deadDeviceId);
-                }
             }
         }
 
@@ -531,36 +672,18 @@ namespace EarGuard.Audio
                 if (_isDisposed) return;
 
                 // Instant high-priority clamp on all currently active endpoints
-                foreach (var guarded in _guardedDevices)
+                for (int i = _guardedDevices.Count - 1; i >= 0; i--)
                 {
+                    var guarded = _guardedDevices[i];
                     if (guarded.VolumeControl == null || guarded.Config == null || !guarded.Config.Enabled)
                         continue;
 
-                    try
+                    guarded.SafePlugInUntilUtc = DateTime.UtcNow.AddMilliseconds(SafePlugInGraceMs);
+                    float target = Math.Min(guarded.Config.SafePlugInVol, guarded.Config.MaxLimit);
+                    var outcome = ApplyVolumeCeiling(guarded, target);
+                    if (outcome.Outcome == VolumeAdjustmentOutcome.Lowered)
                     {
-                        float target = Math.Min(guarded.Config.SafePlugInVol, guarded.Config.MaxLimit);
-                        Guid ctx = ContextGuid;
-                        int hr = guarded.VolumeControl.SetMasterVolumeLevelScalar(target, ref ctx);
-                        if (hr == 0)
-                        {
-                            float oldVol = guarded.CurrentVolume;
-                            guarded.CurrentVolume = target;
-                            if (oldVol > target + 0.001f)
-                            {
-                                RaiseVolumeClamped(guarded, oldVol, target);
-                            }
-                        }
-                        else if (IsRpcErrorCode(hr))
-                        {
-                            TriggerFastResync(guarded.DeviceId);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        if (IsRpcOrComException(ex))
-                        {
-                            TriggerFastResync(guarded.DeviceId);
-                        }
+                        RaiseVolumeClamped(guarded, outcome.OldVolume, outcome.NewVolume);
                     }
                 }
 
@@ -615,7 +738,6 @@ namespace EarGuard.Audio
                 {
                     try
                     {
-                        Thread.Sleep(50);
                         ScanDevices();
                     }
                     finally
@@ -623,6 +745,46 @@ namespace EarGuard.Audio
                         Interlocked.Exchange(ref _resyncPending, 0);
                     }
                 });
+            }
+        }
+
+        /// <summary>
+        /// Resolves the current default playback endpoint. This is advisory only; failure simply
+        /// means the UI falls back to selecting the first available device.
+        /// </summary>
+        private void RefreshDefaultDeviceId()
+        {
+            _defaultDeviceId = string.Empty;
+            if (_enumerator == null) return;
+
+            IMMDevice defaultDevice = null;
+            try
+            {
+                int hr = _enumerator.GetDefaultAudioEndpoint(
+                    CoreAudioConstants.E_RENDER,
+                    CoreAudioConstants.E_CONSOLE,
+                    out defaultDevice
+                );
+
+                if (hr != 0 || defaultDevice == null) return;
+
+                string id = null;
+                int idHr = defaultDevice.GetId(out id);
+                if (idHr == 0 && !string.IsNullOrEmpty(id))
+                {
+                    _defaultDeviceId = id;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("Could not resolve default audio endpoint: " + ex.Message);
+            }
+            finally
+            {
+                if (defaultDevice != null)
+                {
+                    try { Marshal.ReleaseComObject(defaultDevice); } catch { }
+                }
             }
         }
 
@@ -641,6 +803,7 @@ namespace EarGuard.Audio
                 }
                 _enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
                 _notificationClient = new AudioNotificationClient(OnHardwareDevicesChanged);
+                _notificationClient.DeviceDisconnected += OnDeviceDisconnected;
                 _enumerator.RegisterEndpointNotificationCallback(_notificationClient);
             }
             catch (Exception ex)
@@ -668,21 +831,95 @@ namespace EarGuard.Audio
             return ex is InvalidComObjectException;
         }
 
-        public void TestClamp(GuardedDevice device)
+        /// <summary>
+        /// Lowers a guarded endpoint to <paramref name="targetScalar"/> if and only if the hardware
+        /// is currently louder than that value.
+        ///
+        /// This is EarGuard's only endpoint writer. The engine lock serializes the entire
+        /// read/compare/write transaction, including UI, watchdog, resume and callback callers.
+        /// Windows exposes separate read and set operations: an external writer can still change
+        /// volume between them, so this ordering guarantee applies only to EarGuard writers.
+        /// </summary>
+        public VolumeAdjustmentResult ApplyVolumeCeiling(GuardedDevice guarded, float targetScalar)
         {
-            if (device == null || device.VolumeControl == null || device.Config == null) return;
+            lock (_syncRoot)
+            {
+            if (_isDisposed || guarded == null || guarded.VolumeControl == null || guarded.Config == null)
+            {
+                return new VolumeAdjustmentResult(VolumeAdjustmentOutcome.Skipped, 0f, 0f);
+            }
 
-            // Strictly spike ONLY 2% above the device limit (e.g. 30% -> 32%).
-            // Never jump to 100%! This safely exercises the COM callback without any ear trauma.
-            float targetSpike = Math.Min(1.0f, device.Config.MaxLimit + 0.02f);
-            Guid testGuid = Guid.NewGuid();
+            if (!guarded.Config.Enabled)
+            {
+                return new VolumeAdjustmentResult(VolumeAdjustmentOutcome.Skipped, guarded.CurrentVolume, guarded.CurrentVolume);
+            }
+
+            // Normalise the requested target into the legal scalar range before doing anything else.
+            if (float.IsNaN(targetScalar) || targetScalar < 0f) targetScalar = 0f;
+            if (targetScalar > 1f) targetScalar = 1f;
+
+            float current;
+            int readHr;
             try
             {
-                device.VolumeControl.SetMasterVolumeLevelScalar(targetSpike, ref testGuid);
+                readHr = guarded.VolumeControl.GetMasterVolumeLevelScalar(out current);
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine("Test clamp error: " + ex.Message);
+                bool invalidated = IsRpcOrComException(ex);
+                if (invalidated) TriggerFastResync(guarded.DeviceId);
+                return new VolumeAdjustmentResult(invalidated ? VolumeAdjustmentOutcome.RecoveryRequested : VolumeAdjustmentOutcome.Failed, guarded.CurrentVolume, guarded.CurrentVolume);
+            }
+
+            if (readHr != 0)
+            {
+                bool invalidated = IsRpcErrorCode(readHr);
+                if (invalidated) TriggerFastResync(guarded.DeviceId);
+                return new VolumeAdjustmentResult(invalidated ? VolumeAdjustmentOutcome.RecoveryRequested : VolumeAdjustmentOutcome.Failed, guarded.CurrentVolume, guarded.CurrentVolume);
+            }
+
+            // A non-finite scalar cannot be reasoned about; refuse to write anything.
+            if (float.IsNaN(current) || float.IsInfinity(current))
+            {
+                return new VolumeAdjustmentResult(VolumeAdjustmentOutcome.Failed, guarded.CurrentVolume, guarded.CurrentVolume);
+            }
+
+            // Nothing to do: the endpoint is already quiet enough. Critically, this branch is why
+            // EarGuard never raises volume, even when the user raises the ceiling above the current
+            // level or re-enables protection on a quiet device.
+            if (current <= targetScalar + VolumeEpsilon)
+            {
+                guarded.CurrentVolume = current;
+                return new VolumeAdjustmentResult(VolumeAdjustmentOutcome.AlreadySafe, current, current);
+            }
+
+            // Defence in depth: the value we are about to write is explicitly capped at the level we
+            // just read from hardware, so even a nonsensical target can never become an increase.
+            float safeTarget = Math.Max(0f, Math.Min(targetScalar, current));
+
+            int writeHr;
+            try
+            {
+                Guid ctx = ContextGuid;
+                writeHr = guarded.VolumeControl.SetMasterVolumeLevelScalar(safeTarget, ref ctx);
+            }
+            catch (Exception ex)
+            {
+                bool invalidated = IsRpcOrComException(ex);
+                if (invalidated) TriggerFastResync(guarded.DeviceId);
+                return new VolumeAdjustmentResult(invalidated ? VolumeAdjustmentOutcome.RecoveryRequested : VolumeAdjustmentOutcome.Failed, current, current);
+            }
+
+            if (writeHr != 0)
+            {
+                bool invalidated = IsRpcErrorCode(writeHr);
+                if (invalidated) TriggerFastResync(guarded.DeviceId);
+                else System.Diagnostics.Debug.WriteLine("Volume clamp write failed: 0x" + writeHr.ToString("X8"));
+                return new VolumeAdjustmentResult(invalidated ? VolumeAdjustmentOutcome.RecoveryRequested : VolumeAdjustmentOutcome.Failed, current, current);
+            }
+
+            guarded.CurrentVolume = safeTarget;
+            return new VolumeAdjustmentResult(VolumeAdjustmentOutcome.Lowered, current, safeTarget);
             }
         }
 
@@ -780,6 +1017,11 @@ namespace EarGuard.Audio
                 {
                     _watchdogTimer.Dispose();
                     _watchdogTimer = null;
+                }
+                if (_discoveryTimer != null)
+                {
+                    _discoveryTimer.Dispose();
+                    _discoveryTimer = null;
                 }
 
                 _workerRunning = false;

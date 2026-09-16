@@ -11,8 +11,8 @@
   <a href="https://github.com/AmrZriek/EarGuard/releases/latest/download/EarGuard.exe"><img src="https://img.shields.io/badge/Download-EarGuard.exe-brightgreen?style=flat-square&logo=windows" alt="Download" /></a>
   <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D6?style=flat-square&logo=windows" alt="Platform" />
   <img src="https://img.shields.io/badge/.NET%20Framework-4.8%20(Native)-512BD4?style=flat-square" alt=".NET" />
-  <img src="https://img.shields.io/badge/Binary%20Size-76%20KB-success?style=flat-square" alt="Size" />
-  <img src="https://img.shields.io/badge/Latency-%3C2ms%20Hardware%20Clamp-orange?style=flat-square" alt="Latency" />
+  <img src="https://img.shields.io/badge/Binary%20Size-80.5%20KB-success?style=flat-square" alt="Size" />
+  <img src="https://img.shields.io/badge/Safety-Lower--Only%20Volume-16a34a?style=flat-square" alt="Lower Only" />
   <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="License" />
   <a href="https://ko-fi.com/amrzriek"><img src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?style=flat-square&logo=kofi&logoColor=white" alt="Ko-fi" /></a>
 </p>
@@ -36,15 +36,15 @@ If you own a dongle without a physical gain knob, you already know the terror:
 1. You plug in your dongle or wake your PC from sleep.
 2. Windows Audio Service (`AudioSrv`) suffers amnesia, forgets your previous volume, and cheerfully initializes the endpoint at **1.0 (100% master volume)**.
 3. Tidal in Exclusive Mode grabs hardware exclusive access and demands full digital line-level output.
-4. You hit play, and 125 dB of raw acoustic violence blows out your delicate balanced-armature drivers and gives you instant tinnitus.
+4. Playback may start far louder than you intended, risking hearing damage.
 
-**EarGuard solves this permanently.** It runs quietly in your system tray, hooks directly into the physical audio hardware via low-level WASAPI COM callbacks, and clamps any volume spike down in **under 2 milliseconds** before your eardrums register the pressure wave.
+**EarGuard detects and lowers endpoint volume above your chosen limit.** It runs in the tray and uses Windows CoreAudio callbacks with a watchdog behind them. Enforcement is reactive: a brief spike can get through before it responds, and some devices or drivers blunt it entirely. It is not a hearing-safety guarantee, and percentages are not sound-pressure measurements. Keep your listening level low anyway.
 
 ---
 
 ## 📸 The Interface
 
-No bloated Electron. No web views. No 300 MB installer. Just clean, native Windows desktop UI that does one job flawlessly:
+No bloated Electron. No web views. No 300 MB installer. Just a compact, native Windows interface:
 
 <p align="center">
   <img src="screenshot.png" alt="EarGuard UI Screenshot" width="500" />
@@ -52,55 +52,92 @@ No bloated Electron. No web views. No 300 MB installer. Just clean, native Windo
 
 ---
 
-## ✨ Features That Save Your Hearing
+## Features
 
-* **⚡ Sub-2ms Hardware Clamping:** Uses native Windows CoreAudio `IAudioEndpointVolumeCallback`. The moment any rogue process or OS bug attempts to push volume past your ceiling, the COM callback forces the UAC2 hardware volume registers back down in `<2ms`.
-* **🏷️ Unambiguous Hardware Labels:** Queries the full composite friendly name (`PKEY_Device_FriendlyName`) and controller descriptor (`PKEY_DeviceDesc`). You'll always see the exact hardware device (e.g. `Speakers (Realtek(R) Audio)`, `Speakers (fifine Microphone)`, `Headphones (Apple USB-C Adapter)`) rather than generic, identical "Speakers" entries.
-* **🔌 Safe Plug-in & Wake Volume:** Whenever you plug in a USB-C dongle DAC or your laptop resumes from sleep/hibernate, EarGuard automatically drops the hardware endpoint to a whisper-quiet **5%** before anything can play.
-* **🛡️ Selective Device Guarding:** Toggle protection per device with `[✓] Protect`. **Inviolable Invariant:** Disabling protection for an endpoint *never* boosts or increases volume—the scalar remains exactly where it was.
-* **🔒 Zero Dangerous "Pause" Modes:** We removed global pause bypasses entirely. A safety app with a "disable protection" toggle defeats the purpose—EarGuard guards your ears 24/7.
-* **⚡ Tested Safe-Clamp Button:** The "Test Clamp" button spikes volume **strictly 2% above your ceiling** (e.g. 30% → 32%). It proves your hardware clamp works with zero risk of deafening you.
-* **🎯 Tidal Exclusive Mode Tamed:** Operates at the physical endpoint layer (`IAudioEndpointVolume`), meaning it clamps even when bit-perfect players bypass the Windows software mixer.
-* **🍃 Featherweight Footprint:** 
-  * Single standalone portable executable (**~76 KB**).
-  * **0.0% CPU** usage (100% event-driven, zero polling loops).
-  * Built into .NET Framework 4.8—runs out-of-the-box on every Windows 10 and 11 PC with zero prerequisites.
-* **🤫 Silent Background Startup:** When "Start EarGuard automatically with Windows" is enabled, EarGuard launches silently into your system tray (`--tray`) on PC boot with zero intrusive popups or window flashes. Double-clicking the app or clicking the tray icon brings up the interface instantly.
+**It only ever lowers.** One routine writes endpoint volume. It reads the current scalar and asks for a smaller value only when what it read sits above your limit, so raising a ceiling or re-enabling protection on a quiet device writes nothing. EarGuard serializes its own read-compare-write transactions. Windows has no atomic read-and-set, so another app or your own hand on the volume key can still slip a change in between; if something lowers the volume mid-transaction, EarGuard's pending request can land above the newer value. That's a real gap, not a theoretical one.
+
+**Your DAC shows up as your DAC.** Windows hands out form-factor names, which is how you end up with three entries called "Speakers". EarGuard reads `PKEY_Device_FriendlyName` and falls back to `PKEY_DeviceDesc`, so you see `Speakers (Realtek(R) Audio)`, `Speakers (fifine Microphone)`, `Headphones (Apple USB-C Adapter)` and can tell them apart.
+
+**Plug-ins and wake-ups start quiet.** A new endpoint, or a resume from sleep, holds a three-second limit (`SafePlugInVol`, 5% by default). Windows restores an endpoint's previous volume a few hundred milliseconds *after* it appears, which is why a single clamp at detection time isn't enough: callbacks and the watchdog keep pulling the level back down through that window. Late restores included. When the three seconds are up the normal ceiling takes over, and a restored value below the ceiling is left alone. Nothing here blocks playback while EarGuard reacts.
+
+**The window opens on whatever you're actually listening to.** It follows the Windows default endpoint until you pick a device yourself — including deliberately re-picking the one already selected. After that your choice sticks for the session, as long as the device is still around.
+
+**Per-device, no global off switch.** The `Protect` checkbox is per endpoint. Unchecking it doesn't touch the volume; EarGuard just stops limiting that device. Enabled devices stay monitored the whole time EarGuard runs.
+
+**Endpoint-level, not app-level.** It drives `IAudioEndpointVolume`, below the player's own volume control, which is why it still bites in WASAPI exclusive mode when the device and driver expose hardware volume. Not every driver does.
+
+**Alerts you can't hear.** When EarGuard lowers something, an optional tray notification names the device and both levels. The balloon is drawn with `NIIF_NOSOUND`, so the "protection" notice never becomes the loudest thing in the room.
+
+**80.5 KB, and it stays that way.** A single portable executable — 82,432 bytes as shipped, .NET Framework 4.8, no installer and no prerequisites. Protection runs off hardware COM callbacks with a 100 ms watchdog behind them, so idle CPU is noise-level. A device-change notification also costs a couple of scans rather than thirty; the engine rewrites its settings file and rebuilds its device list only when your hardware actually changed.
+
+**Starts hidden.** With "Start with Windows" on, EarGuard launches into the tray with `--tray` and no window. Double-clicking the executable, or the tray icon, opens the interface.
 
 ---
 
 ## 🚀 Quick Start
 
 1. Download [**EarGuard.exe**](https://github.com/AmrZriek/EarGuard/releases/latest/download/EarGuard.exe) from the [Releases](https://github.com/AmrZriek/EarGuard/releases/latest) page.
-2. Run `EarGuard.exe`. It will automatically detect your audio outputs and sit in your system tray.
-3. Select your headphone/DAC dongle from the dropdown, verify `[✓] Protect` is checked, and set your **Hard Volume Ceiling** (e.g. `30%`) and **Safe Plug-in Volume** (e.g. `5%`).
-4. Click **Test Clamp** to watch EarGuard slap a volume spike down in real-time.
-5. Check **"Start EarGuard automatically with Windows"** and minimize to tray. Your ears are now bulletproof.
+2. Run `EarGuard.exe`. It opens the window and detects your audio outputs.
+3. Select your headphone/DAC dongle from the dropdown, verify `[✓] Protect` is checked, and set your **Hard Volume Ceiling** (e.g. `30%`) and **Safe Plug-in Limit** (e.g. `5%`).
+4. Check **"Start with Windows"** and minimize to tray. Keep your listening volume low; EarGuard is an extra precaution, not a hearing-safety guarantee.
 
 ---
 
 ## 🛠️ Compiling from Source
 
-No complicated build scripts, Node modules, or package managers required. C# compilation is literally a two-word command in your terminal:
+Two ways, neither of which needs an installer, Node, or a package manager. The quick one uses the C# compiler already on every Windows box:
 
 ```cmd
 csc @EarGuard.rsp
 ```
 
-The included `EarGuard.rsp` response file supplies the framework references and embeds the transparent `EarGuard.ico`. In under 3 seconds, you have a fresh, optimized `EarGuard.exe`.
+About half a second on a Ryzen 7 6800HS. The in-box compiler produces an 84,992-byte `EarGuard.exe`; Roslyn produces the smaller 82,432 bytes shipped in releases. Either way it lands in the repository root.
+
+If you edit the `.rsp`, keep backslashes in the `src\*\*.cs` globs. Forward slashes there lose the directory part, and the compiler reports every source file as missing — which reads like a broken checkout rather than a bad path.
+
+For the full pipeline — test suite first, then the app, then a SHA-256 of the result:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build.ps1
+```
+
+Under Roslyn (Visual Studio Build Tools) that script builds deterministically: same sources, same bytes, so you can check a download against the hash in the release notes. It passes `/deterministic+` only when Roslyn is present, because the in-box framework compiler predates the switch and rejects it outright. `-NoTest` skips the suite; `-Debug` keeps symbols.
+
+---
+
+## 📋 Release Notes
+
+### v1.1.1
+
+Fixes for protection quietly dropping out on reconnect and wake.
+
+- The plug-in limit now holds for three seconds after a device appears, instead of being applied once at detection. Windows restores an endpoint's previous volume a few hundred milliseconds *after* it shows up, which was overwriting the clamp; if the restored value sat below the ceiling, nothing caught it either.
+- Resume from sleep renews that window, and a disconnect/reconnect between scans no longer slips past it.
+- All endpoint writes go through one locked routine. Overlapping adjustments can no longer undo a quieter setting.
+- A device change no longer triggers ~30 rescans, ~30 settings-file writes, and ~30 UI device-list rebuilds. It now costs a couple of scans and publishes only on a real change.
+- Non-finite values in `settings.json` can't poison the ceiling any more, and null device entries are dropped on load.
+- `%APPDATA%\EarGuard\settings.json` round-trips device names containing backslashes, quotes, and commas.
+- Fixed: `csc @EarGuard.rsp` failed with 17 "source file could not be opened" errors, because forward slashes in the `.rsp` globs lose the directory part.
+- Fixed: the C# 5 compiler in the .NET Framework could not build the new result struct (CS0843), which broke the documented no-build-tools path.
+- `build.ps1` now produces byte-identical binaries under Roslyn. Release assets carry their SHA-256.
+- Removed the volume-raising "Test Clamp" button. Any control that writes a *louder* value to hardware doesn't belong in a hearing-protection tool; the screenshot in this README was also stale and showed it.
+
+### v1.1.0
+
+See the [v1.1.0 release](https://github.com/AmrZriek/EarGuard/releases/tag/v1.1.0) for deterministic logon startup, the MMCSS pro-audio worker, and self-healing recovery.
 
 ---
 
 ## 🎵 Tips for Audiophile Players (Tidal, Foobar2000, Qobuz)
 
-* **Tidal Hi-Fi / Master:** You can safely keep Tidal in **WASAPI Exclusive Mode** for bit-perfect streaming. In Tidal's output settings (`More Settings` next to your DAC), uncheck **"Force Volume"**. When unchecked, Tidal will gracefully synchronize with EarGuard's hardware clamp.
-* **Foobar2000:** Set output to *WASAPI (event)* or *WASAPI (exclusive)*. EarGuard protects the hardware volume regardless of stream mode.
+* **Tidal:** If you use WASAPI Exclusive Mode, turn off **"Force Volume"** in the DAC's output settings so the player does not keep requesting full volume. Check behavior with your device; EarGuard cannot control every driver or exclusive-mode path.
+* **Foobar2000:** WASAPI exclusive output needs hardware endpoint volume support for EarGuard's changes to affect playback. Shared-mode output uses Windows' endpoint volume control.
 
 ---
 
 ## ☕ Support
 
-If EarGuard saved your hearing or IEMs from an accidental 100% blast, consider buying me a coffee!
+If EarGuard helped you catch an unexpected volume change, consider buying me a coffee!
 
 [![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/amrzriek)
 

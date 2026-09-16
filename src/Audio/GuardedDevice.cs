@@ -8,7 +8,6 @@ namespace EarGuard.Audio
     public class GuardedDevice : INotifyPropertyChanged, IDisposable
     {
         private float _currentVolume;
-        private bool _isClampedAlert;
 
         public string DeviceId { get; set; }
         public string DeviceName { get; set; }
@@ -18,7 +17,24 @@ namespace EarGuard.Audio
         public IAudioEndpointVolume VolumeControl { get; set; }
         public AudioEndpointCallback CallbackInstance { get; set; }
 
+        /// <summary>
+        /// While the current time is before this instant, the endpoint is held at the safe plug-in
+        /// limit instead of the ceiling.
+        ///
+        /// This exists because Windows restores an endpoint's previous volume from the registry
+        /// *after* EarGuard first sees the device. Applying the plug-in limit once at detection is
+        /// therefore not enough: Windows overwrites it a few hundred milliseconds later, and if the
+        /// restored value happens to sit below the ceiling, nothing would ever catch it. Re-applying
+        /// the plug-in limit during this window closes that gap.
+        /// </summary>
+        public DateTime SafePlugInUntilUtc { get; set; }
+
         public DeviceConfig Config { get; set; }
+
+        public GuardedDevice()
+        {
+            SafePlugInUntilUtc = DateTime.MinValue;
+        }
 
         public event PropertyChangedEventHandler PropertyChanged;
 
@@ -55,20 +71,6 @@ namespace EarGuard.Audio
         public string CurrentVolumeText
         {
             get { return CurrentVolumePercent + "%"; }
-        }
-
-
-        public bool IsClampedAlert
-        {
-            get { return _isClampedAlert; }
-            set
-            {
-                if (_isClampedAlert != value)
-                {
-                    _isClampedAlert = value;
-                    OnPropertyChanged("IsClampedAlert");
-                }
-            }
         }
 
 
@@ -155,20 +157,20 @@ namespace EarGuard.Audio
                 if (VolumeControl != null)
                 {
                     Marshal.ReleaseComObject(VolumeControl);
-                    VolumeControl = null;
                 }
             }
             catch { }
+            VolumeControl = null;
 
             try
             {
                 if (DeviceCom != null)
                 {
                     Marshal.ReleaseComObject(DeviceCom);
-                    DeviceCom = null;
                 }
             }
             catch { }
+            DeviceCom = null;
 
             CallbackInstance = null;
         }

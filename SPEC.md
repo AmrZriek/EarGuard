@@ -1,7 +1,7 @@
 # EarGuard — Architecture Specification & Engineering Reference
 
 ## 1. Executive Summary
-EarGuard is a lightweight, zero-dependency, portable Windows application (.NET Framework 4.8 / WPF) engineered to protect users of low-impedance In-Ear Monitors (IEMs) and headphones from catastrophic volume spikes caused by USB-C DAC dongles, Windows Audio Service (`AudioSrv`) initialization amnesia, and exclusive-mode media players (Tidal, Qobuz, Foobar2000).
+EarGuard is a lightweight, zero-dependency, portable Windows application (.NET Framework 4.8 / WPF) that detects and lowers endpoint volume above configured limits. It targets unexpected volume changes during device connection, Windows Audio Service initialization, and playback. Enforcement is reactive: it cannot block playback before a change, guarantee no brief spikes, or guarantee hearing safety. Device and driver support determine whether endpoint-volume changes affect exclusive-mode playback.
 
 ---
 
@@ -10,9 +10,9 @@ EarGuard is a lightweight, zero-dependency, portable Windows application (.NET F
 | Module ID | Responsibility | Depends On |
 |---|---|---|
 | `config-store` | Settings persistence (`%APPDATA%\EarGuard\settings.json`), schema validation, safe defaults, startup argument parser (`ShouldStartSilent`), and Windows startup registry integration (`HKCU\...\Run`). | Standard Library (.NET 4.8) |
-| `audio-engine` | Native Windows CoreAudio WASAPI COM interop (`IMMDeviceEnumerator`, `IMMDevice`, `IAudioEndpointVolume`, `IAudioEndpointVolumeCallback`, `IMMNotificationClient`), sub-2ms hardware volume clamping, device connect/disconnect tracking, safe plug-in volume enforcement. | `config-store`, Win32 / OLE32 |
+| `audio-engine` | Native Windows CoreAudio WASAPI COM interop (`IMMDeviceEnumerator`, `IMMDevice`, `IAudioEndpointVolume`, `IAudioEndpointVolumeCallback`, `IMMNotificationClient`), hardware volume clamping through a single lower-only write path, device connect/disconnect tracking, safe plug-in limit enforcement. | `config-store`, Win32 / OLE32 |
 | `tray-manager` | System Tray icon management (`NotifyIcon`), single-instance enforcement (named Mutex), rate-limited balloon notifications on clamp, context menu (Open EarGuard, Exit). | `config-store`, `audio-engine` |
-| `ui-frontend` | Single-page, compact native Windows WPF interface (Segoe UI, high contrast, transparent vector branding), dropdown device selector, device protection card (Ceiling & Safe Plug-in sliders, Live Volume gauge, Safe 2% Test Clamp), global settings toggles. | `config-store`, `audio-engine`, `tray-manager` |
+| `ui-frontend` | Single-page, compact native Windows WPF interface (Segoe UI, high contrast, transparent vector branding), dropdown device selector, device protection card (Ceiling & Safe Plug-in sliders, Live Volume gauge), global settings toggles. | `config-store`, `audio-engine`, `tray-manager` |
 
 ---
 
@@ -37,7 +37,7 @@ In Windows CoreAudio (`endpointvolume.h`), the `IAudioEndpointVolume` interface 
 [Slot 15] GetMute(out bool pbMute)
 ```
 
-> **Critical Safety Finding:** Omission of slots 10–13 caused C# calls to `SetMute` to dispatch directly into `SetChannelVolumeLevel(channel, 0.0f dB)`—which instructed hardware DAC chips to jump to **0 dB (100% full-scale volume)**. EarGuard completely resolved this by correcting the vtable alignment and **purging all mute operations** from the application. EarGuard is strictly an unbreachable ceiling guard, not a mixer.
+> **Critical Safety Finding:** Omission of slots 10–13 caused C# calls to `SetMute` to dispatch into `SetChannelVolumeLevel(channel, 0.0f dB)` rather than muting. The corrected vtable and removal of mute operations address that dispatch error. EarGuard lowers endpoint volume; it is not a mixer or an unbreachable playback limiter.
 
 ### 3.2 Device Naming Architecture
 Windows CoreAudio assigns generic form-factor descriptors to `PKEY_Interface_FriendlyName` (PID 2), returning ambiguous names such as `"Speakers"` or `"Headphones"`. EarGuard resolves the exact hardware endpoint via composite property resolution:
@@ -47,12 +47,15 @@ Windows CoreAudio assigns generic form-factor descriptors to `PKEY_Interface_Fri
    Returns the underlying hardware controller name.
 
 ### 3.3 Protection Invariants
-1. **Always-On Guardian (No Global Pause):** There is no dangerous "Pause Protection" button. A hearing protection tool with a bypass defeats its own purpose.
-2. **Disabling Invariant:** When a user unchecks `[ ] Protect` for a specific output device, the endpoint volume is **never touched, raised, or boosted**. It remains at its current safe level.
-3. **Safe 2% Test Clamp:** Simulating a volume spike by forcing volume to 100% is strictly prohibited. The "Test Clamp" button spikes volume **strictly 2% above the configured ceiling** (`Math.Min(1.0f, MaxLimit + 0.02f)`). The COM callback intercepts this in `<2ms` and forces it back down to `MaxLimit`, confirming the hardware hook works without acoustic shock.
-4. **Safe Plug-in & Wake Volume:** Whenever a new USB DAC endpoint is detected or the computer wakes from sleep/hibernate, EarGuard automatically applies `SafePlugInVol` (default 5%) before audio can play.
-5. **Feedback Loop Prevention:** EarGuard maintains a unique `ContextGuid` on startup. Volume adjustments initiated by EarGuard pass `ref ContextGuid`, which the callback ignores to prevent recursion loops.
-6. **Watchdog Redundancy:** A background timer inspects endpoint scalars every 1000ms as defense-in-depth against hardware sleep/wake glitches.
+1. **No Global Pause:** Enabled endpoints are monitored while EarGuard runs. Protection can be disabled per device.
+2. **Disabling:** Unchecking `[ ] Protect` does not request a volume change. The engine stops limiting that endpoint; other applications and the user remain free to change it.
+3. **Plug-in & Wake Limit:** Detecting a new endpoint or resuming from sleep/hibernate starts a `SafePlugInVol` limit (default 5%). This is a cap, not a target: an endpoint observed at or below it needs no write. It does not delay or block playback.
+4. **Plug-in Grace Window:** The plug-in limit applies for `SafePlugInGraceMs` (3000 ms) after detection or resume. Callbacks and watchdog ticks lower louder values, including late volume restores by Windows. Resume renews this window for existing endpoints. Afterward, the normal ceiling applies, so a restored value below the ceiling is left alone even if it exceeds the plug-in limit.
+5. **Lower-Only Requests:** One routine writes endpoint volume. It reads the current scalar and requests a lower value only when that observation exceeds the active limit; it does not deliberately raise quiet volume to a target. EarGuard serializes its own read/compare/write transactions. These are not atomic against Windows or other applications: an external writer can lower volume between EarGuard's read and write, and EarGuard's pending request can then exceed that newer value. This path cannot provide an absolute never-raises guarantee.
+6. **Feedback Loop Prevention:** EarGuard maintains a unique `ContextGuid` on startup. Volume adjustments initiated by EarGuard pass `ref ContextGuid`, which the callback ignores to prevent recursion loops.
+7. **Watchdog Redundancy:** A background timer inspects endpoint scalars every `WatchdogIntervalMs` (100 ms) as defense-in-depth against hardware sleep/wake glitches.
+8. **Discovery Retries:** Windows finishes re-indexing a newly reported endpoint slightly after it raises the notification, so discovery retries run at `DiscoveryRetryIntervalMs` (500 ms) until `SafePlugInGraceMs` expires. Retries stop early once a scan observes a structural change, so one notification costs a handful of scans rather than one per tick.
+9. **Publish On Change:** A scan re-asserts every cap, but writes `settings.json` and raises `DevicesChanged` only when the guarded device set or the default endpoint actually changed. Without that gate each scan rewrites the settings file and rebuilds the UI device list, which turned a single device change into dozens of file writes and UI rebuilds.
 
 ---
 
@@ -78,7 +81,7 @@ Windows CoreAudio assigns generic form-factor descriptors to `PKEY_Interface_Fri
     ]
   }
   ```
-* **Validation:** Clamps `MaxLimit` between `0.01` and `1.00`, and `SafePlugInVol` between `0.00` and `MaxLimit`. Corrupted JSON files automatically recover to safe defaults.
+* **Validation:** Clamps `MaxLimit` between `0.01` and `1.00`, and `SafePlugInVol` between `0.00` and `MaxLimit`. The ceiling is the user's own choice: any value from 1% to 100% is accepted and honoured exactly. Non-finite values are replaced with safe defaults. Corrupted JSON files automatically recover to safe defaults.
 * **Silent Windows Startup:**
   * When enabled, writes: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\EarGuard = "C:\...\EarGuard.exe" --tray`.
   * `MigrateStartupRegistryIfNeeded()`: Automatically detects and updates legacy registry values lacking `--tray`.
@@ -95,31 +98,44 @@ Windows CoreAudio assigns generic form-factor descriptors to `PKEY_Interface_Fri
   * `Exit EarGuard`
 
 ### 4.3 Module: `ui-frontend`
-* **Layout:** Single-page compact window (`Width: 500`, `Height: 540`, non-resizable, center screen).
+* **Layout:** Compact resizable window (default `500 × 540`, minimum `480 × 520`, center screen). The protection card scrolls vertically when its wrapped content exceeds the available height; header, device selector, and footer stay visible.
 * **Startup Behavior:**
   * If launched with a tray/startup argument, stays hidden in the system tray with zero window popups or banners.
   * If launched directly (e.g. desktop shortcut), shows the main window immediately.
 * **Branding:** Seamless transparent ear-wearing-hard-hat vector icon in the header, bold `EarGuard` title, and green `• Active` status pill.
-* **Device Selector:** Dropdown `ComboBox` listing all active render endpoints with rich friendly names and a refresh button (`🔄`).
+* **Device Selector:** Dropdown `ComboBox` lists active render endpoints by friendly name, with a refresh button. It follows the Windows default until an explicit user commitment, including mouse or keyboard commitment of the already-selected item. Opening or canceling the dropdown and programmatic refresh do not take manual ownership.
 * **Protection Card:**
-  * Endpoint title and hardware description with text-wrapping to prevent clipping.
+  * Endpoint title uses ellipsis; description and helper text wrap to fit.
   * Checkbox: `[✓] Protect` toggle with dynamic `[ 🛡️ Guarded ]` / `[ ⚪ Unprotected ]` status badge.
   * Ceiling Slider: 1% to 100% with real-time numeric readout.
   * Safe Plug-in Slider: 0% to Ceiling with real-time numeric readout.
   * Live Volume Gauge: Real-time progress bar reflecting hardware endpoint volume.
-  * Test Clamp Button: `⚡ Test Clamp` with green verification readout (`✓ Clamped! (32% → 30%) in <2ms`).
-* **Footer:** Startup registry toggle, balloon notification toggle, and "Minimize to Tray" button.
+  * Protection status follows the enabled state. Disabling clears the last-lowering message; queued clamp events do not replace the disabled status. Clamp messages describe historical lowering, not prevented audio.
+  * There is no "test" control. Any feature that writes a louder value to the hardware is prohibited, so protection is verified by using the machine rather than by deliberately provoking a spike.
+* **Footer:** "Start with Windows", "Notify when volume is lowered", and "Minimize to Tray". Optional tray notifications report the observed old volume and requested lower volume after a successful write, with the system notification sound suppressed.
 
 ---
 
 ## 5. Compilation & Tooling
 
-EarGuard compiles in a single command using standard C# response file configuration:
+Two entry points. The response file is the minimal path:
 
 ```cmd
 csc @EarGuard.rsp
 ```
 
+The globs in that file must use backslashes (`src\Audio\*.cs`). With forward slashes the compiler resolves each wildcard against the current directory and reports all 17 sources as missing, which looks like a broken checkout rather than a path bug.
+
+The full pipeline runs the test suite first, then builds the app, then prints its SHA-256:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build.ps1
+```
+
+Under Roslyn from Visual Studio Build Tools the script passes `/deterministic+`, so identical sources yield byte-identical binaries and a published hash can be verified locally. The flag is applied conditionally because the in-box .NET Framework compiler predates it and exits with `CS2007` on an unrecognized option.
+
+**Compiler compatibility:** `src/Audio/AudioEngine.cs` holds `VolumeAdjustmentResult` with explicit readonly fields and read-only properties rather than auto-properties with private setters. The C# 5 compiler shipped with .NET Framework cannot assign an auto-property backing field from a struct constructor (`CS0843`), and the response-file path is documented as working with that compiler.
+
 * **Target:** .NET Framework 4.8
-* **Output:** `EarGuard.exe` (Single standalone portable executable, ~65 KB)
+* **Output:** `EarGuard.exe` (Single standalone portable executable, 82,432 bytes under Roslyn; 84,992 bytes under the in-box .NET Framework compiler)
 * **Dependencies:** Zero external NuGet packages or third-party DLLs. Pure native Windows API.

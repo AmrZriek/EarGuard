@@ -21,6 +21,11 @@ if (-not (Test-Path $csc)) {
     Write-Error "Could not locate C# compiler."
     exit 1
 }
+
+# Roslyn honours /deterministic+ (reproducible binaries); the in-box .NET Framework compiler
+# predates it and rejects the flag outright, so it is only passed when it is actually supported.
+$deterministicArg = @()
+if ($csc -eq $roslynCsc) { $deterministicArg = @("/deterministic+") }
 Write-Host "[1/4] Compiler located: $csc" -ForegroundColor Green
 
 $netDir = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319"
@@ -49,7 +54,7 @@ if (-not $NoTest) {
         "/nologo",
         "/t:exe",
         "/out:$baseDir\TestRunner.exe"
-    ) + $references + $testSources
+    ) + $deterministicArg + $references + $testSources
 
     & $csc $testArgs
     if ($LASTEXITCODE -ne 0) {
@@ -97,7 +102,7 @@ $appArgs = @(
     $targetType,
     "/highentropyva+",
     "/out:$baseDir\EarGuard.exe"
-) + $iconArg + $opt + $references + $appSources
+) + $deterministicArg + $iconArg + $opt + $references + $appSources
 
 & $csc $appArgs
 if ($LASTEXITCODE -ne 0) {

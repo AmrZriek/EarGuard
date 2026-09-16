@@ -103,6 +103,7 @@ namespace EarGuard.Audio
     public static class CoreAudioConstants
     {
         public const int E_RENDER = 0;
+        public const int E_CONSOLE = 0;
         public const int DEVICE_STATE_ACTIVE = 1;
         public const int STGM_READ = 0;
         public const int CLSCTX_ALL = 23;

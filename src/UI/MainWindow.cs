@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -36,8 +37,7 @@ namespace EarGuard.UI
 
         private TextBlock _liveVolText;
         private ProgressBar _liveVolBar;
-        private Button _testClampBtn;
-        private TextBlock _testClampResult;
+        private TextBlock _protectionStatusText;
 
         private CheckBox _startupCheck;
         private CheckBox _notifyCheck;
@@ -46,6 +46,12 @@ namespace EarGuard.UI
         private GuardedDevice _currentSelectedDevice;
         private bool _isUpdatingUiFromCode = false;
         private bool _reallyExit = false;
+
+        // True until the user picks a device themselves. While this is true the window follows
+        // Windows' default playback endpoint, so plugging in a DAC (which becomes the new default)
+        // moves the selection automatically. As soon as the user makes an explicit choice we stop
+        // overriding them for the rest of the session.
+        private bool _followDefaultDevice = true;
 
         public MainWindow(ConfigStore configStore, AudioEngine engine, TrayManager trayManager, SingleInstance singleInstance)
         {
@@ -67,7 +73,7 @@ namespace EarGuard.UI
 
         private void InitializeWindowSettings()
         {
-            Title = "EarGuard — Volume Spike Protector";
+            Title = "EarGuard | Volume Spike Protector";
             Width = 500;
             Height = 540;
             MinWidth = 480;
@@ -154,9 +160,10 @@ namespace EarGuard.UI
             };
             var subtitleText = new TextBlock
             {
-                Text = "Hardware Volume Spike Protector for DACs & IEMs",
+                Text = "Lowers unexpected endpoint volume spikes",
                 FontSize = 11,
                 Foreground = new SolidColorBrush(Color.FromRgb(100, 116, 139)),
+                TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 1, 0, 0)
             };
             titleStack.Children.Add(titleText);
@@ -357,8 +364,9 @@ namespace EarGuard.UI
 
             cardStack.Children.Add(new TextBlock
             {
-                Text = "Any volume spike above this ceiling is clamped in <2ms.",
+                Text = "Lowers volume above this limit after detection.",
                 FontSize = 10.5,
+                TextWrapping = TextWrapping.Wrap,
                 Foreground = new SolidColorBrush(Color.FromRgb(100, 116, 139)),
                 Margin = new Thickness(0, 0, 0, 12)
             });
@@ -370,7 +378,7 @@ namespace EarGuard.UI
 
             safeVolHeader.Children.Add(new TextBlock
             {
-                Text = "Safe Plug-in & Wake Volume",
+                Text = "Safe Plug-in & Wake Limit",
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = new SolidColorBrush(Color.FromRgb(30, 41, 59))
@@ -399,13 +407,14 @@ namespace EarGuard.UI
 
             cardStack.Children.Add(new TextBlock
             {
-                Text = "Automatically applied when DAC dongle is plugged in or wakes from sleep.",
+                Text = "Caps volume for 3 seconds on plug-in or wake. Does not deliberately raise quiet volume to a target.",
                 FontSize = 10.5,
+                TextWrapping = TextWrapping.Wrap,
                 Foreground = new SolidColorBrush(Color.FromRgb(100, 116, 139)),
                 Margin = new Thickness(0, 0, 0, 14)
             });
 
-            // 3. Live Volume & Safe Test Clamp Row
+            // 3. Live Volume Readout
             var liveVolGrid = new Grid();
             liveVolGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             liveVolGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -413,7 +422,6 @@ namespace EarGuard.UI
             var liveRow = new Grid();
             liveRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             liveRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            liveRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
             _liveVolText = new TextBlock
             {
@@ -433,44 +441,35 @@ namespace EarGuard.UI
                 Maximum = 100,
                 Value = 0,
                 Height = 14,
-                Margin = new Thickness(6, 0, 12, 0),
+                Margin = new Thickness(6, 0, 0, 0),
                 VerticalAlignment = VerticalAlignment.Center,
                 Foreground = new SolidColorBrush(Color.FromRgb(59, 130, 246))
             };
             Grid.SetColumn(_liveVolBar, 1);
             liveRow.Children.Add(_liveVolBar);
 
-            _testClampBtn = new Button
-            {
-                Content = "⚡ Test Clamp",
-                FontSize = 11.5,
-                FontWeight = FontWeights.SemiBold,
-                Padding = new Thickness(10, 5, 10, 5),
-                Background = new SolidColorBrush(Color.FromRgb(254, 243, 199)), // Amber 100
-                BorderBrush = new SolidColorBrush(Color.FromRgb(251, 191, 36)), // Amber 400
-                Foreground = new SolidColorBrush(Color.FromRgb(146, 64, 14)), // Amber 900
-                Cursor = System.Windows.Input.Cursors.Hand
-            };
-            Grid.SetColumn(_testClampBtn, 2);
-            liveRow.Children.Add(_testClampBtn);
-
             Grid.SetRow(liveRow, 0);
             liveVolGrid.Children.Add(liveRow);
 
-            _testClampResult = new TextBlock
+            _protectionStatusText = new TextBlock
             {
-                Text = "Safely tests clamp 2% above ceiling with zero ear shock.",
+                Text = "Select a device to view protection status.",
                 FontSize = 10,
-                Foreground = new SolidColorBrush(Color.FromRgb(148, 163, 184)),
-                Margin = new Thickness(0, 4, 0, 0),
-                HorizontalAlignment = HorizontalAlignment.Right
+                Foreground = new SolidColorBrush(Color.FromRgb(100, 116, 139)),
+                Margin = new Thickness(0, 6, 0, 0),
+                TextWrapping = TextWrapping.Wrap
             };
-            Grid.SetRow(_testClampResult, 1);
-            liveVolGrid.Children.Add(_testClampResult);
+            Grid.SetRow(_protectionStatusText, 1);
+            liveVolGrid.Children.Add(_protectionStatusText);
 
             cardStack.Children.Add(liveVolGrid);
 
-            _deviceCard.Child = cardStack;
+            _deviceCard.Child = new ScrollViewer
+            {
+                Content = cardStack,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+            };
             Grid.SetRow(_deviceCard, 2);
             rootGrid.Children.Add(_deviceCard);
 
@@ -499,7 +498,8 @@ namespace EarGuard.UI
 
             _startupCheck = new CheckBox
             {
-                Content = "Start EarGuard automatically with Windows",
+                Content = "Start with Windows",
+                ToolTip = "Start EarGuard automatically in the system tray",
                 FontSize = 11.5,
                 Foreground = new SolidColorBrush(Color.FromRgb(51, 65, 85)),
                 IsChecked = isStartup,
@@ -509,7 +509,7 @@ namespace EarGuard.UI
 
             _notifyCheck = new CheckBox
             {
-                Content = "Show notification popup when a volume spike is blocked",
+                Content = "Notify when volume is lowered",
                 FontSize = 11.5,
                 Foreground = new SolidColorBrush(Color.FromRgb(51, 65, 85)),
                 IsChecked = _engine.Config.ShowNotificationOnBlock
@@ -545,13 +545,32 @@ namespace EarGuard.UI
             _deviceSelector.SelectionChanged += (s, e) =>
             {
                 var item = _deviceSelector.SelectedItem as ComboBoxItem;
-                if (item != null)
+                if (item == null) return;
+
+                var dev = item.Tag as GuardedDevice;
+                if (dev == null) return;
+
+                // A selection change made by the user (not by our own refresh) means they have taken
+                // manual control, so stop following the Windows default endpoint from now on.
+                if (!_isUpdatingUiFromCode)
                 {
-                    var dev = item.Tag as GuardedDevice;
-                    if (dev != null)
-                    {
-                        SelectDevice(dev);
-                    }
+                    _followDefaultDevice = false;
+                }
+
+                SelectDevice(dev);
+            };
+
+            // WPF does not raise SelectionChanged when the current item is committed again.
+            // Only its commit keys count here; opening, Escape, and focus loss do not.
+            _deviceSelector.PreviewKeyDown += (s, e) =>
+            {
+                if (_isUpdatingUiFromCode || !_deviceSelector.IsDropDownOpen || _deviceSelector.SelectedItem == null) return;
+                Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+                bool alt = (Keyboard.Modifiers & ModifierKeys.Alt) != 0;
+                if (key == Key.Enter || (key == Key.F4 && !alt) ||
+                    (alt && (key == Key.Up || key == Key.Down)))
+                {
+                    _followDefaultDevice = false;
                 }
             };
 
@@ -562,24 +581,15 @@ namespace EarGuard.UI
                 _configStore.Save(_engine.Config);
                 UpdateDeviceProtectionUiState();
 
-                // If current volume exceeds ceiling, clamp it down immediately
-                if (_currentSelectedDevice.CurrentVolume > _currentSelectedDevice.Config.MaxLimit)
-                {
-                    try
-                    {
-                        Guid ctx = AudioEngine.ContextGuid;
-                        _currentSelectedDevice.VolumeControl.SetMasterVolumeLevelScalar(_currentSelectedDevice.Config.MaxLimit, ref ctx);
-                        _currentSelectedDevice.CurrentVolume = _currentSelectedDevice.Config.MaxLimit;
-                    }
-                    catch { }
-                }
+                // If the endpoint is louder than the ceiling, bring it down. This deliberately goes
+                // through the engine so that every hardware volume write lives in one audited place.
+                _engine.ApplyVolumeCeiling(_currentSelectedDevice, _currentSelectedDevice.Config.MaxLimit);
             };
 
             _protectDeviceCheck.Unchecked += (s, e) =>
             {
                 if (_isUpdatingUiFromCode || _currentSelectedDevice == null) return;
-                // INVARIANT: Disabling never increases the volume!
-                // Volume stays at its current level; we never push it up.
+                // Disabling does not request a volume change.
                 _currentSelectedDevice.Config.Enabled = false;
                 _configStore.Save(_engine.Config);
                 UpdateDeviceProtectionUiState();
@@ -607,17 +617,8 @@ namespace EarGuard.UI
                     _safeVolSlider.Value = ceiling;
                 }
 
-                // If live volume is currently above new ceiling, clamp immediately!
-                if (_currentSelectedDevice.CurrentVolume > _currentSelectedDevice.Config.MaxLimit)
-                {
-                    try
-                    {
-                        Guid ctx = AudioEngine.ContextGuid;
-                        _currentSelectedDevice.VolumeControl.SetMasterVolumeLevelScalar(_currentSelectedDevice.Config.MaxLimit, ref ctx);
-                        _currentSelectedDevice.CurrentVolume = _currentSelectedDevice.Config.MaxLimit;
-                    }
-                    catch { }
-                }
+                // If the endpoint is louder than the new ceiling, bring it down through the engine.
+                _engine.ApplyVolumeCeiling(_currentSelectedDevice, _currentSelectedDevice.Config.MaxLimit);
 
                 _configStore.Save(_engine.Config);
             };
@@ -631,20 +632,6 @@ namespace EarGuard.UI
 
                 _currentSelectedDevice.Config.SafePlugInVol = AudioEngine.PercentToScalar(safeVol);
                 _configStore.Save(_engine.Config);
-            };
-
-            _testClampBtn.Click += (s, e) =>
-            {
-                if (_currentSelectedDevice == null) return;
-
-                int oldPct = AudioEngine.ScalarToPercent(_currentSelectedDevice.CurrentVolume);
-                int ceilPct = AudioEngine.ScalarToPercent(_currentSelectedDevice.Config.MaxLimit);
-                int spikePct = Math.Min(100, ceilPct + 2);
-
-                _engine.TestClamp(_currentSelectedDevice);
-
-                _testClampResult.Text = string.Format("✓ Clamped! ({0}% → {1}%) in <2ms", spikePct, ceilPct);
-                _testClampResult.Foreground = new SolidColorBrush(Color.FromRgb(22, 101, 52));
             };
 
             _startupCheck.Checked += (s, e) =>
@@ -695,13 +682,14 @@ namespace EarGuard.UI
             {
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
-                    if (_currentSelectedDevice != null && string.Equals(_currentSelectedDevice.DeviceId, args.Device.DeviceId, StringComparison.OrdinalIgnoreCase))
+                    if (_currentSelectedDevice != null && _currentSelectedDevice.Config.Enabled &&
+                        string.Equals(_currentSelectedDevice.DeviceId, args.Device.DeviceId, StringComparison.OrdinalIgnoreCase))
                     {
                         UpdateLiveVolume(args.ClampedVolume);
                         int oldPct = AudioEngine.ScalarToPercent(args.OldVolume);
                         int clampedPct = AudioEngine.ScalarToPercent(args.ClampedVolume);
-                        _testClampResult.Text = string.Format("✓ Clamped! ({0}% → {1}%) in <2ms", oldPct, clampedPct);
-                        _testClampResult.Foreground = new SolidColorBrush(Color.FromRgb(22, 101, 52));
+                        _protectionStatusText.Text = string.Format("Last lowered: {0}% → {1}%.", oldPct, clampedPct);
+                        _protectionStatusText.Foreground = new SolidColorBrush(Color.FromRgb(22, 101, 52));
                     }
 
                     if (_engine.Config.ShowNotificationOnBlock)
@@ -732,6 +720,22 @@ namespace EarGuard.UI
 
             string previouslySelectedId = _currentSelectedDevice != null ? _currentSelectedDevice.DeviceId : null;
 
+            // Until the user picks a device themselves, the window tracks Windows' default playback
+            // endpoint. Without this, a device that was auto-selected once would stay selected
+            // forever, even after the user swaps their default output by plugging in a DAC.
+            string defaultId = _engine.DefaultDeviceId;
+            bool isDefaultKnown = !string.IsNullOrEmpty(defaultId);
+
+            string desiredId;
+            if (_followDefaultDevice && isDefaultKnown)
+            {
+                desiredId = defaultId;
+            }
+            else
+            {
+                desiredId = previouslySelectedId;
+            }
+
             _deviceSelector.Items.Clear();
 
             if (devices.Count == 0)
@@ -759,27 +763,43 @@ namespace EarGuard.UI
                     Content = dev.DisplayName,
                     Tag = dev
                 };
+                item.PreviewMouseLeftButtonUp += (s, e) =>
+                {
+                    if (!_isUpdatingUiFromCode && _deviceSelector.IsDropDownOpen &&
+                        ((ComboBoxItem)s).IsMouseOver)
+                    {
+                        _followDefaultDevice = false;
+                    }
+                };
                 _deviceSelector.Items.Add(item);
 
-                if (previouslySelectedId != null && string.Equals(dev.DeviceId, previouslySelectedId, StringComparison.OrdinalIgnoreCase))
+                if (desiredId != null && string.Equals(dev.DeviceId, desiredId, StringComparison.OrdinalIgnoreCase))
                 {
                     itemToSelect = item;
                 }
             }
 
+            _isUpdatingUiFromCode = true;
+            try
+            {
+                if (itemToSelect != null)
+                {
+                    _deviceSelector.SelectedItem = itemToSelect;
+                }
+                else if (_deviceSelector.Items.Count > 0)
+                {
+                    _deviceSelector.SelectedIndex = 0;
+                    itemToSelect = _deviceSelector.Items[0] as ComboBoxItem;
+                }
+            }
+            finally
+            {
+                _isUpdatingUiFromCode = false;
+            }
+
             if (itemToSelect != null)
             {
-                _deviceSelector.SelectedItem = itemToSelect;
                 SelectDevice(itemToSelect.Tag as GuardedDevice);
-            }
-            else if (_deviceSelector.Items.Count > 0)
-            {
-                _deviceSelector.SelectedIndex = 0;
-                var first = _deviceSelector.Items[0] as ComboBoxItem;
-                if (first != null)
-                {
-                    SelectDevice(first.Tag as GuardedDevice);
-                }
             }
         }
 
@@ -805,9 +825,6 @@ namespace EarGuard.UI
 
                 UpdateLiveVolume(dev.CurrentVolume);
                 UpdateDeviceProtectionUiState();
-
-                _testClampResult.Text = "Safely tests clamp 2% above ceiling with zero ear shock.";
-                _testClampResult.Foreground = new SolidColorBrush(Color.FromRgb(148, 163, 184));
             }
             finally
             {
@@ -820,6 +837,10 @@ namespace EarGuard.UI
 
             bool isGuarded = _currentSelectedDevice.Config.Enabled;
             _protectDeviceCheck.IsChecked = isGuarded;
+            _protectionStatusText.Text = isGuarded
+                ? "Brief spikes and hearing safety cannot be guaranteed."
+                : "Protection is off. EarGuard is not limiting this device.";
+            _protectionStatusText.Foreground = new SolidColorBrush(Color.FromRgb(100, 116, 139));
 
             if (isGuarded)
             {
@@ -831,11 +852,9 @@ namespace EarGuard.UI
 
                 _ceilingSlider.IsEnabled = true;
                 _safeVolSlider.IsEnabled = true;
-                _testClampBtn.IsEnabled = true;
                 _ceilingSlider.Opacity = 1.0;
                 _safeVolSlider.Opacity = 1.0;
-                _testClampBtn.Opacity = 1.0;
-                _selectedDeviceDesc.Text = "Hardware protection is active. Volume is clamped below ceiling.";
+                _selectedDeviceDesc.Text = "Lowers volume above your ceiling.";
             }
             else
             {
@@ -847,11 +866,9 @@ namespace EarGuard.UI
 
                 _ceilingSlider.IsEnabled = false;
                 _safeVolSlider.IsEnabled = false;
-                _testClampBtn.IsEnabled = false;
                 _ceilingSlider.Opacity = 0.55;
                 _safeVolSlider.Opacity = 0.55;
-                _testClampBtn.Opacity = 0.55;
-                _selectedDeviceDesc.Text = "Protection is disabled. Volume will not be clamped.";
+                _selectedDeviceDesc.Text = "Not protected. This device's volume will not be limited.";
             }
         }
 

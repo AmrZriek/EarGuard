@@ -11,6 +11,11 @@ namespace EarGuard.Config
         private readonly ILegacyStartupRegistration _legacyStartupRegistration;
         private readonly string _executablePath;
 
+        // Serialises settings writes. The UI saves on every slider movement while the audio engine
+        // saves from its own worker thread during device scans, so without this the same file could
+        // be written concurrently. Re-entrant because EnsureValid is called from within Save.
+        private readonly object _saveSync = new object();
+
         public string ConfigFilePath { get; private set; }
 
         public ConfigStore()
@@ -78,75 +83,99 @@ namespace EarGuard.Config
         public void Save(EarGuardConfig config, string customPath = null)
         {
             if (config == null) throw new ArgumentNullException("config");
-            EnsureValid(config);
 
-            string targetPath = customPath ?? ConfigFilePath;
-            string dir = Path.GetDirectoryName(targetPath);
-            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            // Serialize store operations, not arbitrary caller assignments to config fields.
+            // Validation, serialization and writing must not interleave with another save
+            // or a device addition through this store.
+            lock (_saveSync)
             {
-                Directory.CreateDirectory(dir);
+                EnsureValid(config);
+
+                string targetPath = customPath ?? ConfigFilePath;
+                string dir = Path.GetDirectoryName(targetPath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+
+                var serializer = new JavaScriptSerializer();
+                string json = serializer.Serialize(config);
+
+                // Simple formatting for readability
+                json = FormatJson(json);
+
+                File.WriteAllText(targetPath, json);
             }
-
-            var serializer = new JavaScriptSerializer();
-            string json = serializer.Serialize(config);
-
-            // Simple formatting for readability
-            json = FormatJson(json);
-            File.WriteAllText(targetPath, json);
         }
 
         public void EnsureValid(EarGuardConfig config)
         {
             if (config == null) return;
 
-            // Clamp global limits. 30% is the hard safety ceiling; lower user limits remain valid.
-            if (config.GlobalMaxLimit < 0.01f) config.GlobalMaxLimit = 0.01f;
-            if (config.GlobalMaxLimit > 0.30f) config.GlobalMaxLimit = 0.30f;
-
-            if (config.GlobalSafePlugInVol < 0.00f) config.GlobalSafePlugInVol = 0.00f;
-            if (config.GlobalSafePlugInVol > config.GlobalMaxLimit) config.GlobalSafePlugInVol = config.GlobalMaxLimit;
-
-            if (config.Devices == null)
+            // Re-entrant with Save and shared with device lookups/additions.
+            lock (_saveSync)
             {
-                config.Devices = new List<DeviceConfig>();
-            }
+                // Keep ceilings within the user's 1%-100% range. NaN takes the safest floor;
+                // signed infinities clamp through the ordinary range comparisons.
+                if (float.IsNaN(config.GlobalMaxLimit)) config.GlobalMaxLimit = 0.01f;
+                if (config.GlobalMaxLimit < 0.01f) config.GlobalMaxLimit = 0.01f;
+                if (config.GlobalMaxLimit > 1.0f) config.GlobalMaxLimit = 1.0f;
 
-            foreach (var dev in config.Devices)
-            {
-                if (dev.MaxLimit < 0.01f) dev.MaxLimit = 0.01f;
-                if (dev.MaxLimit > 0.30f) dev.MaxLimit = 0.30f;
+                if (float.IsNaN(config.GlobalSafePlugInVol) || float.IsInfinity(config.GlobalSafePlugInVol)) config.GlobalSafePlugInVol = 0.0f;
+                if (config.GlobalSafePlugInVol < 0.00f) config.GlobalSafePlugInVol = 0.00f;
+                if (config.GlobalSafePlugInVol > config.GlobalMaxLimit) config.GlobalSafePlugInVol = config.GlobalMaxLimit;
 
-                if (dev.SafePlugInVol < 0.00f) dev.SafePlugInVol = 0.00f;
-                if (dev.SafePlugInVol > dev.MaxLimit) dev.SafePlugInVol = dev.MaxLimit;
+                if (config.Devices == null)
+                {
+                    config.Devices = new List<DeviceConfig>();
+                }
+
+                // Drop invalid null entries so downstream consumers never dereference them.
+                config.Devices.RemoveAll(d => d == null);
+
+                foreach (var dev in config.Devices)
+                {
+                    if (float.IsNaN(dev.MaxLimit)) dev.MaxLimit = 0.01f;
+                    if (dev.MaxLimit < 0.01f) dev.MaxLimit = 0.01f;
+                    if (dev.MaxLimit > 1.0f) dev.MaxLimit = 1.0f;
+
+                    if (float.IsNaN(dev.SafePlugInVol) || float.IsInfinity(dev.SafePlugInVol)) dev.SafePlugInVol = 0.0f;
+                    if (dev.SafePlugInVol < 0.00f) dev.SafePlugInVol = 0.00f;
+                    if (dev.SafePlugInVol > dev.MaxLimit) dev.SafePlugInVol = dev.MaxLimit;
+                }
             }
         }
 
         public DeviceConfig GetOrCreateDeviceConfig(EarGuardConfig config, string deviceId, string deviceName)
         {
             if (config == null) throw new ArgumentNullException("config");
-            if (config.Devices == null) config.Devices = new List<DeviceConfig>();
 
-            var existing = config.Devices.Find(d => string.Equals(d.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
-            if (existing != null)
+            lock (_saveSync)
             {
-                if (!string.IsNullOrEmpty(deviceName))
+                if (config.Devices == null) config.Devices = new List<DeviceConfig>();
+
+                var existing = config.Devices.Find(d => string.Equals(d.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+                if (existing != null)
                 {
-                    existing.DeviceName = deviceName;
+                    if (!string.IsNullOrEmpty(deviceName))
+                    {
+                        existing.DeviceName = deviceName;
+                    }
+                    return existing;
                 }
-                return existing;
+
+                var newDevice = new DeviceConfig
+                {
+                    DeviceId = deviceId,
+                    DeviceName = !string.IsNullOrEmpty(deviceName) ? deviceName : "Audio Device",
+                    Enabled = true,
+                    MaxLimit = config.GlobalMaxLimit,
+                    SafePlugInVol = config.GlobalSafePlugInVol
+                };
+
+                config.Devices.Add(newDevice);
+                return newDevice;
             }
-
-            var newDevice = new DeviceConfig
-            {
-                DeviceId = deviceId,
-                DeviceName = !string.IsNullOrEmpty(deviceName) ? deviceName : "Audio Device",
-                Enabled = true,
-                MaxLimit = config.GlobalMaxLimit,
-                SafePlugInVol = config.GlobalSafePlugInVol
-            };
-
-            config.Devices.Add(newDevice);
-            return newDevice;
         }
 
         public bool SetStartupEnabled(bool enable)
