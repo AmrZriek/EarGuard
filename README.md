@@ -111,30 +111,15 @@ Under Roslyn (Visual Studio Build Tools) that script builds deterministically: s
 
 ### v1.1.2
 
-Logon startup no longer breaks when the file you launched EarGuard from is moved or deleted.
+"Start with Windows" now survives moving or deleting the folder you launched EarGuard from: startup registers a durable per-user copy at `%LOCALAPPDATA%\EarGuard\EarGuard.exe`, and stale registrations repair themselves on the next launch. The tray icon also keeps its logo on the exe-only installed copy.
 
-- "Start with Windows" now registers a per-user copy at `%LOCALAPPDATA%\EarGuard\EarGuard.exe` instead of the folder you ran it from. Run it from `Downloads` or a USB stick, then clear that folder out — sign-in still launches EarGuard. Settings stay in `%APPDATA%\EarGuard`, so nothing about your configuration moves with it.
-- A task left pointing at a path that no longer exists is detected on the next launch and rewritten. Before this, the task kept firing at every logon and failed silently with `0x80070002`.
-- Updating cannot repair a registration whose executable is already gone. If EarGuard stopped launching at sign-in for that reason, re-download and turn "Start with Windows" on again.
-- `build.ps1` stops a running instance before compiling. The compiler cannot replace an executable it holds open, and the failed build could leave a truncated `EarGuard.exe` behind.
-- The tray icon keeps its EarGuard logo even in the exe-only installed copy (`%LOCALAPPDATA%\EarGuard`): the icon fallback now reads the logo embedded in the executable itself, instead of falling back to a generic placeholder when no logo files sit beside the exe.
+SHA-256: `C3A7050104555BA5DE9EF588337CF64C3309F057CAFA8F8F9FB242CE5205572F`
 
-SHA-256: `C3A7050104555BA5DE9EF588337CF64C3309F057CAFA8F8F9FB242CE5205572F` (84,992 bytes)
+Full notes: [v1.1.2 release](https://github.com/AmrZriek/EarGuard/releases/tag/v1.1.2)
 
 ### v1.1.1
 
-Fixes for protection quietly dropping out on reconnect and wake.
-
-- The plug-in limit now holds for three seconds after a device appears, instead of being applied once at detection. Windows restores an endpoint's previous volume a few hundred milliseconds *after* it shows up, which was overwriting the clamp; if the restored value sat below the ceiling, nothing caught it either.
-- Resume from sleep renews that window, and a disconnect/reconnect between scans no longer slips past it.
-- All endpoint writes go through one locked routine. Overlapping adjustments can no longer undo a quieter setting.
-- A device change no longer triggers ~30 rescans, ~30 settings-file writes, and ~30 UI device-list rebuilds. It now costs a couple of scans and publishes only on a real change.
-- Non-finite values in `settings.json` can't poison the ceiling any more, and null device entries are dropped on load.
-- `%APPDATA%\EarGuard\settings.json` round-trips device names containing backslashes, quotes, and commas.
-- Fixed: `csc @EarGuard.rsp` failed with 17 "source file could not be opened" errors, because forward slashes in the `.rsp` globs lose the directory part.
-- Fixed: the C# 5 compiler in the .NET Framework could not build the new result struct (CS0843), which broke the documented no-build-tools path.
-- `build.ps1` now produces byte-identical binaries under Roslyn. Release assets carry their SHA-256.
-- Removed the volume-raising "Test Clamp" button. Any control that writes a *louder* value to hardware doesn't belong in a hearing-protection tool; the screenshot in this README was also stale and showed it.
+Fixes for protection quietly dropping out after a device reconnect or waking from sleep, plus a significant cut in background churn. Full notes: [v1.1.1 release](https://github.com/AmrZriek/EarGuard/releases/tag/v1.1.1).
 
 ### v1.1.0
 
