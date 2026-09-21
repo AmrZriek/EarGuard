@@ -11,7 +11,7 @@
   <a href="https://github.com/AmrZriek/EarGuard/releases/latest/download/EarGuard.exe"><img src="https://img.shields.io/badge/Download-EarGuard.exe-brightgreen?style=flat-square&logo=windows" alt="Download" /></a>
   <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D6?style=flat-square&logo=windows" alt="Platform" />
   <img src="https://img.shields.io/badge/.NET%20Framework-4.8%20(Native)-512BD4?style=flat-square" alt=".NET" />
-  <img src="https://img.shields.io/badge/Binary%20Size-80.5%20KB-success?style=flat-square" alt="Size" />
+  <img src="https://img.shields.io/badge/Binary%20Size-83%20KB-success?style=flat-square" alt="Size" />
   <img src="https://img.shields.io/badge/Safety-Lower--Only%20Volume-16a34a?style=flat-square" alt="Lower Only" />
   <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="License" />
   <a href="https://ko-fi.com/amrzriek"><img src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?style=flat-square&logo=kofi&logoColor=white" alt="Ko-fi" /></a>
@@ -68,9 +68,11 @@ No bloated Electron. No web views. No 300 MB installer. Just a compact, native W
 
 **Alerts you can't hear.** When EarGuard lowers something, an optional tray notification names the device and both levels. The balloon is drawn with `NIIF_NOSOUND`, so the "protection" notice never becomes the loudest thing in the room.
 
-**80.5 KB, and it stays that way.** A single portable executable — 82,432 bytes as shipped, .NET Framework 4.8, no installer and no prerequisites. Protection runs off hardware COM callbacks with a 100 ms watchdog behind them, so idle CPU is noise-level. A device-change notification also costs a couple of scans rather than thirty; the engine rewrites its settings file and rebuilds its device list only when your hardware actually changed.
+**83 KB, and it stays that way.** A single portable executable — 84,992 bytes as shipped, .NET Framework 4.8, no installer and no prerequisites. Protection runs off hardware COM callbacks with a 100 ms watchdog behind them, so idle CPU is noise-level. A device-change notification also costs a couple of scans rather than thirty; the engine rewrites its settings file and rebuilds its device list only when your hardware actually changed.
 
 **Starts hidden.** With "Start with Windows" on, EarGuard launches into the tray with `--tray` and no window. Double-clicking the executable, or the tray icon, opens the interface.
+
+**Moving the file doesn't break startup.** Enabling "Start with Windows" installs a copy to `%LOCALAPPDATA%\EarGuard` and points the logon task at that, not at wherever you happened to run it from. Delete the download afterwards, move the folder, empty `Downloads` — sign-in still works.
 
 ---
 
@@ -91,7 +93,7 @@ Two ways, neither of which needs an installer, Node, or a package manager. The q
 csc @EarGuard.rsp
 ```
 
-About half a second on a Ryzen 7 6800HS. The in-box compiler produces an 84,992-byte `EarGuard.exe`; Roslyn produces the smaller 82,432 bytes shipped in releases. Either way it lands in the repository root.
+About half a second on a Ryzen 7 6800HS. The in-box compiler produces an 87,552-byte `EarGuard.exe`; Roslyn produces the smaller 84,992 bytes shipped in releases. Either way it lands in the repository root.
 
 If you edit the `.rsp`, keep backslashes in the `src\*\*.cs` globs. Forward slashes there lose the directory part, and the compiler reports every source file as missing — which reads like a broken checkout rather than a bad path.
 
@@ -106,6 +108,18 @@ Under Roslyn (Visual Studio Build Tools) that script builds deterministically: s
 ---
 
 ## 📋 Release Notes
+
+### v1.1.2
+
+Logon startup no longer breaks when the file you launched EarGuard from is moved or deleted.
+
+- "Start with Windows" now registers a per-user copy at `%LOCALAPPDATA%\EarGuard\EarGuard.exe` instead of the folder you ran it from. Run it from `Downloads` or a USB stick, then clear that folder out — sign-in still launches EarGuard. Settings stay in `%APPDATA%\EarGuard`, so nothing about your configuration moves with it.
+- A task left pointing at a path that no longer exists is detected on the next launch and rewritten. Before this, the task kept firing at every logon and failed silently with `0x80070002`.
+- Updating cannot repair a registration whose executable is already gone. If EarGuard stopped launching at sign-in for that reason, re-download and turn "Start with Windows" on again.
+- `build.ps1` stops a running instance before compiling. The compiler cannot replace an executable it holds open, and the failed build could leave a truncated `EarGuard.exe` behind.
+- The tray icon keeps its EarGuard logo even in the exe-only installed copy (`%LOCALAPPDATA%\EarGuard`): the icon fallback now reads the logo embedded in the executable itself, instead of falling back to a generic placeholder when no logo files sit beside the exe.
+
+SHA-256: `C3A7050104555BA5DE9EF588337CF64C3309F057CAFA8F8F9FB242CE5205572F` (84,992 bytes)
 
 ### v1.1.1
 

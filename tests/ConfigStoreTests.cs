@@ -22,8 +22,13 @@ namespace EarGuard.Tests
             Test_GetOrCreateDeviceConfig_AddsAndRetrieves();
             Test_SilentLaunchArgs_DetectedCorrectly();
             Test_StartupRegistration_DelegatesToRegistrar();
+            Test_StartupRegistration_PrefersInstalledCopy();
+            Test_StartupMigration_RepairsStaleTaskPath();
+            Test_StartupMigration_LeavesHealthyTaskAlone();
+            Test_StartupMigration_PersistsEnabledPreference();
             Test_StartupTaskDefinition_IsPortableAndDeterministic();
             Test_StartupMigration_PreservesLegacyOnTaskFailure();
+            ApplicationInstallerTests.RunAll();
             Console.WriteLine("[PASS] All ConfigStoreTests passed!");
         }
 
@@ -344,18 +349,92 @@ namespace EarGuard.Tests
         {
             var registrar = new FakeStartupRegistrar { Enabled = false };
             var legacy = new FakeLegacyStartupRegistration { Enabled = false };
-            var store = new ConfigStore(registrar, legacy, @"D:\Portable Folder\EarGuard.exe");
+            var installer = new FakeApplicationInstaller { Result = @"C:\Users\me\AppData\Local\EarGuard\EarGuard.exe" };
+            var store = new ConfigStore(registrar, legacy, @"D:\Portable Folder\EarGuard.exe", installer);
 
             Assert(!store.IsStartupEnabled(), "Disabled task must report disabled");
             Assert(store.SetStartupEnabled(true), "Enable must succeed when registrar succeeds");
             Assert(registrar.EnableCalls == 1, "Enable must delegate exactly once");
-            Assert(registrar.LastExecutablePath.EndsWith("EarGuard.exe", StringComparison.OrdinalIgnoreCase),
-                "Enable must register the current executable");
+            Assert(registrar.LastExecutablePath == installer.Result,
+                "Enable must register the durable installed copy, not the launch location");
             Assert(legacy.RemoveCalls == 1, "Enable must remove only the legacy EarGuard registration");
 
             Assert(store.SetStartupEnabled(false), "Disable must succeed when registrar succeeds");
             Assert(registrar.DisableCalls == 1, "Disable must delegate exactly once");
             Console.WriteLine("  ✓ Test_StartupRegistration_DelegatesToRegistrar");
+        }
+
+        private static void Test_StartupRegistration_PrefersInstalledCopy()
+        {
+            var registrar = new FakeStartupRegistrar { Enabled = false };
+            var legacy = new FakeLegacyStartupRegistration { Enabled = false };
+            var installer = new FakeApplicationInstaller { Result = @"C:\Users\me\AppData\Local\EarGuard\EarGuard.exe" };
+            var store = new ConfigStore(registrar, legacy, @"C:\Users\me\Downloads\EarGuard.exe", installer);
+
+            store.MigrateStartupRegistrationIfNeeded(new EarGuardConfig { LaunchOnStartup = true });
+
+            Assert(installer.Calls == 1, "Registration must resolve the durable install target exactly once");
+            Assert(installer.LastRunningPath == @"C:\Users\me\Downloads\EarGuard.exe",
+                "Installer must be given the path EarGuard was launched from");
+            Assert(registrar.RegisteredPath == installer.Result,
+                "Logon startup must point at the installed copy, not the Downloads folder it was launched from");
+            Console.WriteLine("  ✓ Test_StartupRegistration_PrefersInstalledCopy");
+        }
+
+        private static void Test_StartupMigration_RepairsStaleTaskPath()
+        {
+            // The reported failure: the task exists and is enabled, but names a path that no longer
+            // resolves, so every logon launches nothing and the tray silently never appears.
+            var registrar = new FakeStartupRegistrar
+            {
+                Enabled = true,
+                RegisteredPath = @"D:\Build Tree\EarGuard.exe"
+            };
+            var legacy = new FakeLegacyStartupRegistration { Enabled = false };
+            var installer = new FakeApplicationInstaller { Result = @"C:\Users\me\AppData\Local\EarGuard\EarGuard.exe" };
+            var store = new ConfigStore(registrar, legacy, @"D:\Build Tree\EarGuard.exe", installer);
+
+            bool migrated = store.MigrateStartupRegistrationIfNeeded(new EarGuardConfig { LaunchOnStartup = true });
+
+            Assert(migrated, "Repairing a stale registration must succeed");
+            Assert(registrar.EnableCalls == 1, "A task pointing at the wrong path must be rewritten");
+            Assert(registrar.RegisteredPath == installer.Result,
+                "Repaired task must point at the durable installed copy");
+            Console.WriteLine("  ✓ Test_StartupMigration_RepairsStaleTaskPath");
+        }
+
+        private static void Test_StartupMigration_LeavesHealthyTaskAlone()
+        {
+            const string installed = @"C:\Users\me\AppData\Local\EarGuard\EarGuard.exe";
+            var registrar = new FakeStartupRegistrar { Enabled = true, RegisteredPath = installed };
+            var legacy = new FakeLegacyStartupRegistration { Enabled = false };
+            var installer = new FakeApplicationInstaller { Result = installed };
+            var store = new ConfigStore(registrar, legacy, installed, installer);
+
+            bool migrated = store.MigrateStartupRegistrationIfNeeded(new EarGuardConfig { LaunchOnStartup = true });
+
+            Assert(migrated, "An already-correct registration must report success");
+            Assert(registrar.EnableCalls == 0, "A healthy task must not be rewritten on every launch");
+            Assert(legacy.RemoveCalls == 1, "A stray legacy Run value must still be migrated away");
+            Console.WriteLine("  ✓ Test_StartupMigration_LeavesHealthyTaskAlone");
+        }
+
+        private static void Test_StartupMigration_PersistsEnabledPreference()
+        {
+            var registrar = new FakeStartupRegistrar
+            {
+                Enabled = true,
+                RegisteredPath = @"C:\Users\me\AppData\Local\EarGuard\EarGuard.exe"
+            };
+            var legacy = new FakeLegacyStartupRegistration { Enabled = false };
+            var installer = new FakeApplicationInstaller { Result = registrar.RegisteredPath };
+            var store = new ConfigStore(registrar, legacy, registrar.RegisteredPath, installer);
+            var config = new EarGuardConfig { LaunchOnStartup = false };
+
+            store.MigrateStartupRegistrationIfNeeded(config);
+
+            Assert(config.LaunchOnStartup, "An enabled task remains the system source of truth");
+            Console.WriteLine("  ✓ Test_StartupMigration_PersistsEnabledPreference");
         }
 
         private static void Test_StartupTaskDefinition_IsPortableAndDeterministic()
@@ -376,7 +455,8 @@ namespace EarGuard.Tests
         {
             var registrar = new FakeStartupRegistrar { EnableResult = false };
             var legacy = new FakeLegacyStartupRegistration { Enabled = true };
-            var store = new ConfigStore(registrar, legacy, @"D:\Portable Folder\EarGuard.exe");
+            var store = new ConfigStore(registrar, legacy, @"D:\Portable Folder\EarGuard.exe",
+                new FakeApplicationInstaller());
             var config = EarGuardConfig.CreateDefault();
             config.LaunchOnStartup = false;
 
@@ -396,8 +476,15 @@ namespace EarGuard.Tests
             public int EnableCalls;
             public int DisableCalls;
             public string LastExecutablePath;
+            public string RegisteredPath;
 
             public bool IsEnabled() { return Enabled; }
+
+            public bool IsEnabledFor(string executablePath)
+            {
+                if (!Enabled) return false;
+                return string.Equals(RegisteredPath, executablePath, StringComparison.OrdinalIgnoreCase);
+            }
 
             public bool Enable(string executablePath)
             {
@@ -405,6 +492,7 @@ namespace EarGuard.Tests
                 LastExecutablePath = executablePath;
                 if (!EnableResult) return false;
                 Enabled = true;
+                RegisteredPath = executablePath;
                 return true;
             }
 
@@ -412,7 +500,22 @@ namespace EarGuard.Tests
             {
                 DisableCalls++;
                 Enabled = false;
+                RegisteredPath = null;
                 return true;
+            }
+        }
+
+        private sealed class FakeApplicationInstaller : IApplicationInstaller
+        {
+            public string Result;
+            public int Calls;
+            public string LastRunningPath;
+
+            public string ResolveStartupExecutable(string runningExecutablePath)
+            {
+                Calls++;
+                LastRunningPath = runningExecutablePath;
+                return Result ?? runningExecutablePath;
             }
         }
 

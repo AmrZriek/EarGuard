@@ -9,7 +9,13 @@ namespace EarGuard.Config
     {
         private readonly IStartupRegistrar _startupRegistrar;
         private readonly ILegacyStartupRegistration _legacyStartupRegistration;
+        private readonly IApplicationInstaller _applicationInstaller;
         private readonly string _executablePath;
+
+        // The path handed to the startup registrar. Resolved once, because resolving installs the
+        // running build into the durable per-user location and that must not happen on a read path.
+        private readonly object _startupSync = new object();
+        private string _resolvedStartupExecutable;
 
         // Serialises settings writes. The UI saves on every slider movement while the audio engine
         // saves from its own worker thread during device scans, so without this the same file could
@@ -19,7 +25,7 @@ namespace EarGuard.Config
         public string ConfigFilePath { get; private set; }
 
         public ConfigStore()
-            : this(null, null, null)
+            : this(null, null, null, null)
         {
         }
 
@@ -27,14 +33,42 @@ namespace EarGuard.Config
             IStartupRegistrar startupRegistrar,
             ILegacyStartupRegistration legacyStartupRegistration,
             string executablePath)
+            : this(startupRegistrar, legacyStartupRegistration, executablePath, null)
+        {
+        }
+
+        internal ConfigStore(
+            IStartupRegistrar startupRegistrar,
+            ILegacyStartupRegistration legacyStartupRegistration,
+            string executablePath,
+            IApplicationInstaller applicationInstaller)
         {
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string earGuardDir = Path.Combine(appData, "EarGuard");
             ConfigFilePath = Path.Combine(earGuardDir, "settings.json");
             _startupRegistrar = startupRegistrar ?? new TaskSchedulerStartupRegistrar();
             _legacyStartupRegistration = legacyStartupRegistration ?? new LegacyRunStartupRegistration();
+            _applicationInstaller = applicationInstaller ?? new ApplicationInstaller();
             _executablePath = executablePath ?? GetCurrentExecutablePath();
         }
+
+        /// <summary>
+        /// The absolute path logon startup should launch. On first use this installs the running
+        /// build into the durable per-user directory, so startup never depends on wherever the user
+        /// happened to launch EarGuard from.
+        /// </summary>
+        internal string ResolveStartupExecutable()
+        {
+            lock (_startupSync)
+            {
+                if (_resolvedStartupExecutable == null)
+                {
+                    _resolvedStartupExecutable = _applicationInstaller.ResolveStartupExecutable(_executablePath);
+                }
+                return _resolvedStartupExecutable;
+            }
+        }
+
 
         private static string GetCurrentExecutablePath()
         {
@@ -182,7 +216,9 @@ namespace EarGuard.Config
         {
             if (enable)
             {
-                if (!_startupRegistrar.Enable(_executablePath)) return false;
+                string startupExecutable = ResolveStartupExecutable();
+                if (string.IsNullOrEmpty(startupExecutable)) return false;
+                if (!_startupRegistrar.Enable(startupExecutable)) return false;
                 return _legacyStartupRegistration.Remove();
             }
 
@@ -190,6 +226,13 @@ namespace EarGuard.Config
             return _legacyStartupRegistration.Remove();
         }
 
+        /// <summary>
+        /// Reconciles the configured preference, the legacy Run registration and the logon task.
+        ///
+        /// Also repairs a registration that points at a path that no longer resolves - the failure
+        /// this exists to prevent: the task survived, still fired at every logon, and launched
+        /// nothing because the executable it named had been cleaned up.
+        /// </summary>
         public bool MigrateStartupRegistrationIfNeeded(EarGuardConfig config = null)
         {
             bool taskEnabled = _startupRegistrar.IsEnabled();
@@ -197,10 +240,20 @@ namespace EarGuard.Config
             bool shouldEnable = taskEnabled || legacyEnabled || (config != null && config.LaunchOnStartup);
 
             if (!shouldEnable) return true;
-            if (!_startupRegistrar.Enable(_executablePath)) return false;
+
+            string startupExecutable = ResolveStartupExecutable();
+            if (string.IsNullOrEmpty(startupExecutable)) return false;
+
+            // Rewrites the task whenever it is missing, points at another path, or names a stale
+            // location; a task already bound to the durable path is left completely alone.
+            if (!_startupRegistrar.IsEnabledFor(startupExecutable))
+            {
+                if (!_startupRegistrar.Enable(startupExecutable)) return false;
+            }
+
             if (!_legacyStartupRegistration.Remove()) return false;
 
-            if (config != null)
+            if (config != null && !config.LaunchOnStartup)
             {
                 config.LaunchOnStartup = true;
                 Save(config);

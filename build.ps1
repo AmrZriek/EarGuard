@@ -26,7 +26,7 @@ if (-not (Test-Path $csc)) {
 # predates it and rejects the flag outright, so it is only passed when it is actually supported.
 $deterministicArg = @()
 if ($csc -eq $roslynCsc) { $deterministicArg = @("/deterministic+") }
-Write-Host "[1/4] Compiler located: $csc" -ForegroundColor Green
+Write-Host "[1/5] Compiler located: $csc" -ForegroundColor Green
 
 $netDir = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319"
 $wpfDir = "$netDir\WPF"
@@ -46,7 +46,7 @@ $references = @(
 
 # Step 1: Run Unit Tests
 if (-not $NoTest) {
-    Write-Host "[2/4] Building and executing test suite..." -ForegroundColor Cyan
+    Write-Host "[2/5] Building and executing test suite..." -ForegroundColor Cyan
 
     $testSources = Get-ChildItem -Path "$baseDir\src\Config\*.cs", "$baseDir\src\Audio\*.cs", "$baseDir\src\Tray\TrayIconRecovery.cs", "$baseDir\tests\*.cs" | Select-Object -ExpandProperty FullName
 
@@ -85,16 +85,29 @@ if (-not $NoTest) {
         }
     }
 } else {
-    Write-Host "[2/4] Skipping tests (-NoTest specified)." -ForegroundColor Yellow
+    Write-Host "[2/5] Skipping tests (-NoTest specified)." -ForegroundColor Yellow
 }
 
 # Step 2: Build Application
-Write-Host "[3/4] Building EarGuard.exe..." -ForegroundColor Cyan
+Write-Host "[3/5] Building EarGuard.exe..." -ForegroundColor Cyan
 
 $appSources = Get-ChildItem -Path "$baseDir\src\Config\*.cs", "$baseDir\src\Audio\*.cs", "$baseDir\src\Tray\*.cs", "$baseDir\src\UI\*.cs", "$baseDir\src\Program.cs" | Select-Object -ExpandProperty FullName
 
 $targetType = "/t:winexe"
 $opt = if ($Debug) { "/debug+" } else { "/optimize+", "/debug-" }
+
+# Stop a running instance before compiling into the repository.
+#
+# The compiler opens the output file for writing, and a running EarGuard holds its own executable
+# open. Without this the build fails with CS2012 and, worse, can leave a truncated EarGuard.exe
+# behind - which then breaks logon startup with "file not found" until someone rebuilds. Stopping
+# first makes the build reproducible whether or not EarGuard is currently running.
+$runningBeforeBuild = Get-Process -Name 'EarGuard' -ErrorAction SilentlyContinue
+if ($runningBeforeBuild) {
+    Write-Host "  Stopping the running EarGuard instance so the binary can be replaced..." -ForegroundColor Yellow
+    $runningBeforeBuild | Stop-Process -Force
+    Start-Sleep -Milliseconds 700
+}
 
 $iconArg = if (Test-Path "$baseDir\EarGuard.ico") { @("/win32icon:$baseDir\EarGuard.ico") } else { @() }
 $appArgs = @(
@@ -111,7 +124,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Step 3: Verification
-Write-Host "[4/4] Verifying binary output..." -ForegroundColor Cyan
+Write-Host "[4/5] Verifying binary output..." -ForegroundColor Cyan
 $exePath = "$baseDir\EarGuard.exe"
 if (Test-Path $exePath) {
     $fileItem = Get-Item $exePath
@@ -121,6 +134,70 @@ if (Test-Path $exePath) {
     $fileStream.Close()
     $hashString = [System.BitConverter]::ToString($hashBytes).Replace("-", "").ToUpperInvariant()
     $sizeKb = [Math]::Round($fileItem.Length / 1024, 2)
+
+    # Step 3: Refresh the installed copy logon startup launches
+    #
+    # 'Start with Windows' registers a scheduled task against a stable per-user copy of the executable
+    # (ApplicationInstaller), not against this working tree. Rebuilding here therefore has to refresh
+    # that copy, otherwise the machine keeps running the previous build at logon while the repository
+    # holds a newer one. Only ever touched when the task is already registered - a user who has not
+    # enabled startup gets no stray files installed behind their back.
+    Write-Host "[5/5] Refreshing the installed copy used by logon startup..." -ForegroundColor Cyan
+
+    $installedExe = Join-Path $env:LOCALAPPDATA "EarGuard\EarGuard.exe"
+    $registered = $false
+    try {
+        $task = Get-ScheduledTask -TaskName "EarGuardStartup" -ErrorAction SilentlyContinue
+        if ($task) { $registered = $true }
+    } catch { }
+    if (-not $registered) {
+        try {
+            $runValue = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'EarGuard' -ErrorAction SilentlyContinue
+            if ($runValue) { $registered = $true }
+        } catch { }
+    }
+
+    if (-not $registered) {
+        Write-Host "  Startup is not registered; leaving no installed copy behind." -ForegroundColor Yellow
+    } elseif (-not (Test-Path $exePath)) {
+        Write-Host "  Skipped: no built executable to install." -ForegroundColor Yellow
+    } else {
+        try {
+            # Replacing a running binary fails, so stop the tray instance first and restart it after.
+            $running = Get-Process -Name 'EarGuard' -ErrorAction SilentlyContinue
+            $wasRunning = $null -ne $running
+            if ($wasRunning) {
+                $running | Stop-Process -Force
+                Start-Sleep -Milliseconds 700
+            }
+
+            $installDir = Split-Path $installedExe -Parent
+            if (-not (Test-Path $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }
+
+            # Compare before copying so a no-op rebuild leaves the installed file's timestamp alone.
+            $needsCopy = $true
+            if (Test-Path $installedExe) {
+                $sourceHash = (Get-FileHash $exePath -Algorithm SHA256).Hash
+                $targetHash = (Get-FileHash $installedExe -Algorithm SHA256).Hash
+                if ($sourceHash -eq $targetHash) { $needsCopy = $false }
+            }
+
+            if ($needsCopy) {
+                Copy-Item $exePath $installedExe -Force
+                Write-Host "  Installed: $installedExe" -ForegroundColor Green
+            } else {
+                Write-Host "  Installed copy already current." -ForegroundColor Green
+            }
+
+            if ($wasRunning) {
+                Start-Process $installedExe -ArgumentList '--tray'
+                Write-Host "  Restarted EarGuard from the installed location." -ForegroundColor Green
+            }
+        } catch {
+            Write-Host "  Could not refresh the installed copy: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "  The running instance keeps its current registration." -ForegroundColor Yellow
+        }
+    }
 
     Write-Host ""
     Write-Host "=================================================" -ForegroundColor Green

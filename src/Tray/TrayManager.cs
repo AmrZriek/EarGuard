@@ -175,6 +175,22 @@ namespace EarGuard.Tray
                 catch { }
             }
 
+            // The installed copy (%LOCALAPPDATA%\EarGuard) ships the exe alone: no loose PNG or
+            // ICO sits beside it. The logo is still present - it is embedded in the executable
+            // itself via /win32icon at compile time - so extract that before giving up on branding.
+            // ExtractAssociatedIcon returns an owning Icon: it must stay alive for the lifetime of
+            // the tray icon, so it is intentionally NOT wrapped in a using block.
+            try
+            {
+                string exePath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                if (!string.IsNullOrEmpty(exePath))
+                {
+                    _trayIcon = Icon.ExtractAssociatedIcon(exePath);
+                    if (_trayIcon != null) return;
+                }
+            }
+            catch { }
+
             _trayIcon = CreateShieldIcon(Color.FromArgb(16, 163, 74), Color.White);
         }
 

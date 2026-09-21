@@ -43,6 +43,91 @@ namespace EarGuard.Config
             }
         }
 
+        public bool IsEnabledFor(string executablePath)
+        {
+            if (string.IsNullOrEmpty(executablePath)) return false;
+
+            string expected;
+            try
+            {
+                expected = System.IO.Path.GetFullPath(executablePath);
+            }
+            catch
+            {
+                return false;
+            }
+
+            object service = null;
+            try
+            {
+                service = Connect();
+                object folder = Invoke(service, "GetFolder", "\\");
+                try
+                {
+                    object task = Invoke(folder, "GetTask", StartupTaskDefinition.Build("EarGuard.exe").TaskName);
+                    try
+                    {
+                        object actions = Get(task, "Actions");
+                        try
+                        {
+                            int count = (int)Get(actions, "Count");
+                            for (int i = 1; i <= count; i++)
+                            {
+                                object action = Invoke(actions, "Item", i);
+                                try
+                                {
+                                    if ((int)Get(action, "Type") != TASK_ACTION_EXEC) continue;
+
+                                    var exec = Get(action, "Path") as string;
+                                    if (string.IsNullOrEmpty(exec)) continue;
+
+                                    string registered;
+                                    try
+                                    {
+                                        registered = System.IO.Path.GetFullPath(exec);
+                                    }
+                                    catch
+                                    {
+                                        continue;
+                                    }
+
+                                    if (string.Equals(registered, expected, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        return true;
+                                    }
+                                }
+                                finally
+                                {
+                                    Release(action);
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            Release(actions);
+                        }
+                    }
+                    finally
+                    {
+                        Release(task);
+                    }
+                    return false;
+                }
+                finally
+                {
+                    Release(folder);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                Release(service);
+            }
+        }
+
         public bool Enable(string executablePath)
         {
             if (string.IsNullOrEmpty(executablePath)) return false;
