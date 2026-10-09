@@ -2,8 +2,6 @@
 
 > **Hardware Volume Spike Protector for IEM & Headphone Audiophiles**
 
-**Version 1.1.3**
-
 <p align="center">
   <img src="EarGuard.png" alt="EarGuard Logo" width="140" height="140" />
 </p>
