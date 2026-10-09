@@ -70,7 +70,12 @@ namespace EarGuard.Config
                 // normal logon does not touch the disk at all.
                 if (!IsSameFile(runningPath, targetPath))
                 {
-                    File.Copy(runningPath, targetPath, true);
+                    string staged = targetPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                    File.Copy(runningPath, staged);
+                    if (!IsSameFile(runningPath, staged)) throw new IOException("Staged executable verification failed.");
+                    if (File.Exists(targetPath))
+                        File.Replace(staged, targetPath, targetPath + "." + Guid.NewGuid().ToString("N") + ".bak");
+                    else File.Move(staged, targetPath);
                 }
 
                 return targetPath;

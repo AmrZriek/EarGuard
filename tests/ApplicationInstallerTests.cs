@@ -27,9 +27,7 @@ namespace EarGuard.Tests
 
         private static string NewScratchDirectory()
         {
-            string path = Path.Combine(Path.GetTempPath(), "EarGuard_Install_" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(path);
-            return path;
+            return TestEnvironment.ScratchDirectory();
         }
 
         private static void Test_ResolveInstallsIntoStableLocation()
@@ -54,7 +52,7 @@ namespace EarGuard.Tests
                     "The durable copy must not be the launch location");
 
                 // The whole point: deleting the original must not affect the registered target.
-                File.Delete(launched);
+                File.Move(launched, launched + ".retained");
                 Assert(File.Exists(resolved),
                     "The registered executable must survive deletion of the original launch file");
                 Assert(File.ReadAllText(resolved) == "build-one", "Installed copy must match the running build");
@@ -62,7 +60,7 @@ namespace EarGuard.Tests
             }
             finally
             {
-                TryDelete(root);
+                // Retain isolated artifacts.
             }
         }
 
@@ -84,7 +82,7 @@ namespace EarGuard.Tests
             }
             finally
             {
-                TryDelete(root);
+                // Retain isolated artifacts.
             }
         }
 
@@ -114,7 +112,7 @@ namespace EarGuard.Tests
             }
             finally
             {
-                TryDelete(root);
+                // Retain isolated artifacts.
             }
         }
 
@@ -139,13 +137,9 @@ namespace EarGuard.Tests
             }
             finally
             {
-                TryDelete(root);
+                // Retain isolated artifacts.
             }
         }
 
-        private static void TryDelete(string directory)
-        {
-            try { Directory.Delete(directory, true); } catch { }
-        }
     }
 }

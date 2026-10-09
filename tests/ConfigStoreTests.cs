@@ -21,6 +21,7 @@ namespace EarGuard.Tests
             Test_CorruptJson_RecoversWithDefaults();
             Test_GetOrCreateDeviceConfig_AddsAndRetrieves();
             Test_SilentLaunchArgs_DetectedCorrectly();
+            Test_StartupPartialFailures_ReportActualState();
             Test_StartupRegistration_DelegatesToRegistrar();
             Test_StartupRegistration_PrefersInstalledCopy();
             Test_StartupMigration_RepairsStaleTaskPath();
@@ -53,10 +54,10 @@ namespace EarGuard.Tests
 
         private static void Test_SerializationAndDeserialization_RoundTrips()
         {
-            string tempFile = Path.Combine(Path.GetTempPath(), "EarGuard_Test_RoundTrip_" + Guid.NewGuid() + ".json");
+            string tempFile = Path.Combine(TestEnvironment.ScratchDirectory(), "EarGuard_Test_RoundTrip_" + Guid.NewGuid() + ".json");
             try
             {
-                var store = new ConfigStore();
+                var store = TestEnvironment.Store();
                 var original = new EarGuardConfig
                 {
                     GlobalMaxLimit = 0.22f,
@@ -91,14 +92,14 @@ namespace EarGuard.Tests
             {
                 if (File.Exists(tempFile))
                 {
-                    try { File.Delete(tempFile); } catch { }
+                    // Retain isolated test artifacts for inspection.
                 }
             }
         }
 
         private static void Test_Validation_ClampsOutOfRangeValues()
         {
-            var store = new ConfigStore();
+            var store = TestEnvironment.Store();
             var config = new EarGuardConfig
             {
                 GlobalMaxLimit = 1.50f, // above the legal 100% maximum
@@ -126,7 +127,7 @@ namespace EarGuard.Tests
         {
             // Regression guard: validation used to silently snap every ceiling down to 30%,
             // so the UI showed one value while the engine enforced another.
-            var store = new ConfigStore();
+            var store = TestEnvironment.Store();
             var config = EarGuardConfig.CreateDefault();
             config.GlobalMaxLimit = 0.75f;
             config.Devices.Add(new DeviceConfig
@@ -144,7 +145,7 @@ namespace EarGuard.Tests
             Assert(Math.Abs(config.Devices[0].MaxLimit - 0.75f) < 0.0001f,
                 "A 75% per-device ceiling must be preserved exactly");
 
-            string tempFile = Path.Combine(Path.GetTempPath(), "EarGuard_Test_Ceiling_" + Guid.NewGuid() + ".json");
+            string tempFile = Path.Combine(TestEnvironment.ScratchDirectory(), "EarGuard_Test_Ceiling_" + Guid.NewGuid() + ".json");
             try
             {
                 store.Save(config, tempFile);
@@ -156,7 +157,7 @@ namespace EarGuard.Tests
             {
                 if (File.Exists(tempFile))
                 {
-                    try { File.Delete(tempFile); } catch { }
+                    // Retain isolated test artifacts for inspection.
                 }
             }
 
@@ -165,11 +166,11 @@ namespace EarGuard.Tests
 
         private static void Test_CorruptJson_RecoversWithDefaults()
         {
-            string tempFile = Path.Combine(Path.GetTempPath(), "EarGuard_Test_Corrupt_" + Guid.NewGuid() + ".json");
+            string tempFile = Path.Combine(TestEnvironment.ScratchDirectory(), "EarGuard_Test_Corrupt_" + Guid.NewGuid() + ".json");
             try
             {
                 File.WriteAllText(tempFile, "{ broken json ::: corrupt 1234 }");
-                var store = new ConfigStore();
+                var store = TestEnvironment.Store();
                 var loaded = store.Load(tempFile);
                 Assert(loaded != null, "Corrupt file should return default config, not null");
                 Assert(Math.Abs(loaded.GlobalMaxLimit - 0.30f) < 0.001f, "Default GlobalMaxLimit must be restored");
@@ -179,14 +180,14 @@ namespace EarGuard.Tests
             {
                 if (File.Exists(tempFile))
                 {
-                    try { File.Delete(tempFile); } catch { }
+                    // Retain isolated test artifacts for inspection.
                 }
             }
         }
 
         private static void Test_GetOrCreateDeviceConfig_AddsAndRetrieves()
         {
-            var store = new ConfigStore();
+            var store = TestEnvironment.Store();
             var config = EarGuardConfig.CreateDefault();
 
             var dev1 = store.GetOrCreateDeviceConfig(config, "DEV-A", "Headphones");
@@ -205,7 +206,7 @@ namespace EarGuard.Tests
 
         private static void Test_Validation_NormalizesNonFiniteCeilings()
         {
-            var store = new ConfigStore();
+            var store = TestEnvironment.Store();
             float[] values = { float.NegativeInfinity, float.NaN, float.PositiveInfinity };
             float[] expected = { 0.01f, 0.01f, 1.0f };
             for (int i = 0; i < values.Length; i++)
@@ -235,8 +236,8 @@ namespace EarGuard.Tests
 
         private static void Test_Validation_RemovesNullDeviceEntries()
         {
-            var store = new ConfigStore();
-            string tempFile = Path.Combine(Path.GetTempPath(), "EarGuard_Test_Nulls_" + Guid.NewGuid() + ".json");
+            var store = TestEnvironment.Store();
+            string tempFile = Path.Combine(TestEnvironment.ScratchDirectory(), "EarGuard_Test_Nulls_" + Guid.NewGuid() + ".json");
             try
             {
                 File.WriteAllText(tempFile,
@@ -255,16 +256,16 @@ namespace EarGuard.Tests
             }
             finally
             {
-                if (File.Exists(tempFile)) File.Delete(tempFile);
+                // Retain isolated test artifacts for inspection.
             }
         }
 
         private static void Test_ConcurrentSaveAndDeviceAddition_RoundTrips()
         {
-            var store = new ConfigStore();
+            var store = TestEnvironment.Store();
             var config = EarGuardConfig.CreateDefault();
             config.GlobalMaxLimit = 0.75f;
-            string tempFile = Path.Combine(Path.GetTempPath(), "EarGuard_Test_Concurrent_" + Guid.NewGuid() + ".json");
+            string tempFile = Path.Combine(TestEnvironment.ScratchDirectory(), "EarGuard_Test_Concurrent_" + Guid.NewGuid() + ".json");
             const int deviceCount = 64;
             var errors = new Exception[3];
             var workers = new Thread[3];
@@ -282,11 +283,16 @@ namespace EarGuard.Tests
                                 start.WaitOne();
                                 for (int i = 0; i < deviceCount; i++)
                                 {
-                                    // Two scanners discover the same IDs while a third worker
-                                    // saves. No caller field writes are made during the race.
+                                    // Two scanners discover IDs while a UI-style updater changes
+                                    // settings through the same boundary used by MainWindow.
                                     if (index != 0)
                                         store.GetOrCreateDeviceConfig(config, "DEV-" + i, "Device " + i);
-                                    store.Save(config, tempFile);
+                                    else store.Update(config, () =>
+                                    {
+                                        config.ShowNotificationOnBlock = i % 2 == 0;
+                                        config.GlobalSafePlugInVol = (float)i / 100f;
+                                    });
+                                    Assert(store.Save(config, tempFile), "Concurrent commit must succeed");
                                 }
                             }
                             catch (Exception ex)
@@ -304,6 +310,9 @@ namespace EarGuard.Tests
                     // Do not save again here: that could conceal an older in-flight save
                     // overwriting a newer device list after the scanners finish.
                     var loaded = store.Load(tempFile);
+                    Assert(loaded.ShowNotificationOnBlock == config.ShowNotificationOnBlock
+                        && loaded.GlobalSafePlugInVol == config.GlobalSafePlugInVol,
+                        "Older snapshots must not overwrite the final UI edit");
                     Assert(loaded.Devices.Count == deviceCount,
                         "Concurrent saves must persist every discovered device exactly once");
                     var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -320,7 +329,7 @@ namespace EarGuard.Tests
                     start.Set();
                     foreach (var worker in workers)
                         if (worker != null && worker.IsAlive) worker.Join();
-                    if (File.Exists(tempFile)) File.Delete(tempFile);
+                    // Retain isolated test artifacts for inspection.
                 }
             }
         }
@@ -350,7 +359,7 @@ namespace EarGuard.Tests
             var registrar = new FakeStartupRegistrar { Enabled = false };
             var legacy = new FakeLegacyStartupRegistration { Enabled = false };
             var installer = new FakeApplicationInstaller { Result = @"C:\Users\me\AppData\Local\EarGuard\EarGuard.exe" };
-            var store = new ConfigStore(registrar, legacy, @"D:\Portable Folder\EarGuard.exe", installer);
+            var store = TestEnvironment.Store(registrar, legacy, @"D:\Portable Folder\EarGuard.exe", installer);
 
             Assert(!store.IsStartupEnabled(), "Disabled task must report disabled");
             Assert(store.SetStartupEnabled(true), "Enable must succeed when registrar succeeds");
@@ -369,7 +378,7 @@ namespace EarGuard.Tests
             var registrar = new FakeStartupRegistrar { Enabled = false };
             var legacy = new FakeLegacyStartupRegistration { Enabled = false };
             var installer = new FakeApplicationInstaller { Result = @"C:\Users\me\AppData\Local\EarGuard\EarGuard.exe" };
-            var store = new ConfigStore(registrar, legacy, @"C:\Users\me\Downloads\EarGuard.exe", installer);
+            var store = TestEnvironment.Store(registrar, legacy, @"C:\Users\me\Downloads\EarGuard.exe", installer);
 
             store.MigrateStartupRegistrationIfNeeded(new EarGuardConfig { LaunchOnStartup = true });
 
@@ -392,7 +401,7 @@ namespace EarGuard.Tests
             };
             var legacy = new FakeLegacyStartupRegistration { Enabled = false };
             var installer = new FakeApplicationInstaller { Result = @"C:\Users\me\AppData\Local\EarGuard\EarGuard.exe" };
-            var store = new ConfigStore(registrar, legacy, @"D:\Build Tree\EarGuard.exe", installer);
+            var store = TestEnvironment.Store(registrar, legacy, @"D:\Build Tree\EarGuard.exe", installer);
 
             bool migrated = store.MigrateStartupRegistrationIfNeeded(new EarGuardConfig { LaunchOnStartup = true });
 
@@ -409,7 +418,7 @@ namespace EarGuard.Tests
             var registrar = new FakeStartupRegistrar { Enabled = true, RegisteredPath = installed };
             var legacy = new FakeLegacyStartupRegistration { Enabled = false };
             var installer = new FakeApplicationInstaller { Result = installed };
-            var store = new ConfigStore(registrar, legacy, installed, installer);
+            var store = TestEnvironment.Store(registrar, legacy, installed, installer);
 
             bool migrated = store.MigrateStartupRegistrationIfNeeded(new EarGuardConfig { LaunchOnStartup = true });
 
@@ -428,7 +437,7 @@ namespace EarGuard.Tests
             };
             var legacy = new FakeLegacyStartupRegistration { Enabled = false };
             var installer = new FakeApplicationInstaller { Result = registrar.RegisteredPath };
-            var store = new ConfigStore(registrar, legacy, registrar.RegisteredPath, installer);
+            var store = TestEnvironment.Store(registrar, legacy, registrar.RegisteredPath, installer);
             var config = new EarGuardConfig { LaunchOnStartup = false };
 
             store.MigrateStartupRegistrationIfNeeded(config);
@@ -455,7 +464,7 @@ namespace EarGuard.Tests
         {
             var registrar = new FakeStartupRegistrar { EnableResult = false };
             var legacy = new FakeLegacyStartupRegistration { Enabled = true };
-            var store = new ConfigStore(registrar, legacy, @"D:\Portable Folder\EarGuard.exe",
+            var store = TestEnvironment.Store(registrar, legacy, @"D:\Portable Folder\EarGuard.exe",
                 new FakeApplicationInstaller());
             var config = EarGuardConfig.CreateDefault();
             config.LaunchOnStartup = false;
@@ -469,10 +478,28 @@ namespace EarGuard.Tests
             Console.WriteLine("  ✓ Test_StartupMigration_PreservesLegacyOnTaskFailure");
         }
 
+        private static void Test_StartupPartialFailures_ReportActualState()
+        {
+            var registrar = new FakeStartupRegistrar { EnableResult = false };
+            var legacy = new FakeLegacyStartupRegistration();
+            var store = TestEnvironment.Store(registrar, legacy);
+            Assert(!store.SetStartupEnabled(true) && !store.IsStartupEnabled(), "Failed enable must not report startup enabled");
+            registrar.EnableResult = true;
+            legacy.Enabled = true; legacy.RemoveResult = false;
+            Assert(!store.SetStartupEnabled(true) && store.IsStartupEnabled(), "Legacy cleanup failure must report partial success and actual registration");
+            registrar.DisableResult = false;
+            Assert(!store.SetStartupEnabled(false) && store.IsStartupEnabled(), "Failed disable must retain actual enabled state");
+            registrar.DisableResult = true;
+            Assert(!store.SetStartupEnabled(false) && store.IsStartupEnabled(), "Remaining legacy registration must remain visible after task removal");
+            legacy.RemoveResult = true;
+            Assert(store.SetStartupEnabled(false) && !store.IsStartupEnabled(), "Complete removal must report disabled");
+        }
+
         private sealed class FakeStartupRegistrar : IStartupRegistrar
         {
             public bool Enabled;
             public bool EnableResult = true;
+            public bool DisableResult = true;
             public int EnableCalls;
             public int DisableCalls;
             public string LastExecutablePath;
@@ -499,6 +526,7 @@ namespace EarGuard.Tests
             public bool Disable()
             {
                 DisableCalls++;
+                if (!DisableResult) return false;
                 Enabled = false;
                 RegisteredPath = null;
                 return true;
@@ -523,12 +551,14 @@ namespace EarGuard.Tests
         {
             public bool Enabled;
             public int RemoveCalls;
+            public bool RemoveResult = true;
 
             public bool IsEnabled() { return Enabled; }
 
             public bool Remove()
             {
                 RemoveCalls++;
+                if (!RemoveResult) return false;
                 Enabled = false;
                 return true;
             }

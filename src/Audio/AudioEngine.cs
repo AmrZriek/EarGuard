@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -79,9 +80,8 @@ namespace EarGuard.Audio
         ///
         /// Retries exist because Windows finishes re-indexing a USB endpoint slightly after it
         /// raises the notification. The interval is deliberately coarser than the watchdog, which
-        /// already re-caps attached endpoints every <see cref="WatchdogIntervalMs"/>. Retries also
-        /// stop as soon as a scan finds the endpoint set unchanged, so one device change costs a
-        /// couple of scans instead of one per tick.
+        /// already re-caps attached endpoints every <see cref="WatchdogIntervalMs"/>. The full
+        /// bounded arrival window is retained for staggered endpoints; failures retry at this rate.
         /// </summary>
         public const int DiscoveryRetryIntervalMs = 500;
 
@@ -90,7 +90,13 @@ namespace EarGuard.Audio
 
         private readonly ConfigStore _configStore;
         private readonly EarGuardConfig _config;
-        private readonly object _syncRoot = new object();
+        private readonly object _syncRoot;
+        private readonly Func<IMMDeviceEnumerator> _createEnumerator;
+        private readonly ConcurrentQueue<Action> _publications = new ConcurrentQueue<Action>();
+        private int _publishingEvents;
+        private bool _notificationsRegistered;
+        private bool _discoveryFailed;
+        private int _hardwareChangePending;
         private readonly List<GuardedDevice> _guardedDevices = new List<GuardedDevice>();
         private readonly HashSet<string> _seenDeviceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -98,9 +104,8 @@ namespace EarGuard.Audio
         private AudioNotificationClient _notificationClient;
         private Timer _watchdogTimer;
         private Timer _discoveryTimer;
-        private DateTime _discoveryUntilUtc;
+        private long _discoveryUntil;
         private bool _structureChangedSincePublish;
-        private int _discoveryObservedChange;
         private Thread _workerThread;
         private BlockingCollection<Action> _workQueue;
         private volatile bool _workerRunning;
@@ -109,12 +114,11 @@ namespace EarGuard.Audio
         private bool _isDisposed;
         private string _defaultDeviceId = string.Empty;
 
-        [ThreadStatic]
-        private static bool t_isMmcssRegistered;
 
         public bool IsMmcssActive { get; private set; }
         public event EventHandler<VolumeClampedEventArgs> VolumeClamped;
         public event EventHandler DevicesChanged;
+        internal event Action<bool> DiscoveryCompleted;
         public event EventHandler<GuardedDevice> VolumeChanged;
 
         public EarGuardConfig Config
@@ -150,10 +154,15 @@ namespace EarGuard.Audio
         }
 
         public AudioEngine(ConfigStore configStore, EarGuardConfig config)
+            : this(configStore, config, () => (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject()) { }
+
+        internal AudioEngine(ConfigStore configStore, EarGuardConfig config, Func<IMMDeviceEnumerator> createEnumerator)
         {
             if (configStore == null) throw new ArgumentNullException("configStore");
             if (config == null) throw new ArgumentNullException("config");
             _configStore = configStore;
+            _syncRoot = configStore.SyncRoot;
+            _createEnumerator = createEnumerator;
             _config = config;
         }
 
@@ -161,7 +170,7 @@ namespace EarGuard.Audio
         {
             lock (_syncRoot)
             {
-                if (_enumerator != null) return;
+                if (_workerRunning || _isDisposed) return;
 
                 // Start prioritized Pro Audio MMCSS worker thread
                 _workQueue = new BlockingCollection<Action>();
@@ -174,22 +183,10 @@ namespace EarGuard.Audio
                 };
                 _workerThread.Start();
 
-                try
-                {
-                    _enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
-                    _notificationClient = new AudioNotificationClient(OnHardwareDevicesChanged);
-                    _notificationClient.DeviceDisconnected += OnDeviceDisconnected;
-                    _enumerator.RegisterEndpointNotificationCallback(_notificationClient);
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine("AudioEngine start failed to init COM enumerator: " + ex.Message);
-                }
-
-                ScanDevices();
-
                 // Defense-in-depth ultra-fast watchdog running every 100ms
                 _watchdogTimer = new Timer(WatchdogTick, null, WatchdogIntervalMs, WatchdogIntervalMs);
+                _discoveryTimer = new Timer(DiscoveryRetryTick, null, DiscoveryRetryIntervalMs, DiscoveryRetryIntervalMs);
+                RequestScan();
             }
         }
 
@@ -243,319 +240,229 @@ namespace EarGuard.Audio
                 _mmcssHandle = IntPtr.Zero;
                 IsMmcssActive = false;
             }
+            if (_isDisposed) Cleanup();
         }
 
         private void PostWork(Action action)
         {
-            if (!_workerRunning || _isDisposed || _workQueue == null) return;
+            var queue = _workQueue;
+            if (!_workerRunning || _isDisposed || queue == null) return;
             try
             {
-                _workQueue.Add(action);
+                queue.Add(action);
             }
-            catch { }
+            catch (InvalidOperationException) { }
         }
 
         /// <summary>
-        /// Releases a COM object without letting a release failure escape.
-        ///
-        /// ReleaseComObject throws when the reference is not a COM object, and it is called while
-        /// iterating discovered endpoints. An exception there would abort the rest of the scan and
-        /// skip device removal, leaving endpoints guarded after they have gone away, so release
-        /// failures are swallowed to keep scan progress intact.
+        /// Releases native objects while allowing deterministic tests to supply managed stand-ins.
         /// </summary>
         private static void SafeReleaseComObject(object comObject)
         {
             if (comObject == null) return;
-            try { Marshal.ReleaseComObject(comObject); } catch (ArgumentException) { }
+            if (Marshal.IsComObject(comObject)) Marshal.ReleaseComObject(comObject);
         }
 
-        private static void EnsureThreadMmcss()
+        internal static long Deadline(int milliseconds)
         {
-            if (t_isMmcssRegistered) return;
-            try
-            {
-                int taskIndex = 0;
-                CoreAudioConstants.AvSetMmThreadCharacteristics("Pro Audio", ref taskIndex);
-                Thread.CurrentThread.Priority = ThreadPriority.Highest;
-                t_isMmcssRegistered = true;
-            }
-            catch { }
+            return Stopwatch.GetTimestamp() + (long)(milliseconds * (double)Stopwatch.Frequency / 1000);
         }
 
         public void ScanDevices()
         {
-            lock (_syncRoot)
+            bool publish = false;
+            bool scanSucceeded = false;
+            try
             {
-                if (_enumerator == null || _isDisposed) return;
+                lock (_syncRoot)
+                {
+                    if (_isDisposed) return;
+                    string defaultBefore = _defaultDeviceId;
+                    _discoveryFailed = false;
+                    IMMDeviceCollection collection = null;
+                    try
+                    {
+                        if (_enumerator == null) ReinitializeEnumerator();
+                        if (_enumerator == null) { _discoveryFailed = true; return; }
+                        RegisterNotifications();
+                        int hr = _enumerator.EnumAudioEndpoints(CoreAudioConstants.E_RENDER,
+                            CoreAudioConstants.DEVICE_STATE_ACTIVE, out collection);
+                        if (hr != 0 || collection == null)
+                        {
+                            _discoveryFailed = true;
+                            ReinitializeEnumerator();
+                            return;
+                        }
+                        uint count;
+                        if (collection.GetCount(out count) != 0) { _discoveryFailed = true; return; }
+                        RefreshDefaultDeviceId();
+                        var active = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        bool complete = true;
+                        for (uint i = 0; i < count; i++)
+                        {
+                            IMMDevice device = null;
+                            try
+                            {
+                                if (collection.Item(i, out device) != 0 || device == null)
+                                { complete = false; continue; }
+                                string id;
+                                if (device.GetId(out id) != 0 || string.IsNullOrEmpty(id))
+                                { complete = false; continue; }
+                                active.Add(id);
+                                var existing = _guardedDevices.Find(d => string.Equals(d.DeviceId, id, StringComparison.OrdinalIgnoreCase));
+                                if (existing != null)
+                                {
+                                    if (_seenDeviceIds.Add(id)) existing.SafePlugInUntil = Deadline(SafePlugInGraceMs);
+                                    RegisterVolumeCallback(existing);
+                                    float target = IsWithinSafePlugInWindow(existing)
+                                        ? Math.Min(existing.Config.SafePlugInVol, existing.Config.MaxLimit) : existing.Config.MaxLimit;
+                                    var result = ApplyVolumeCeiling(existing, target);
+                                    if (result.Outcome == VolumeAdjustmentOutcome.Lowered)
+                                        RaiseVolumeClamped(existing, result.OldVolume, result.NewVolume);
+                                }
+                                else if (AttachEndpoint(device, id)) device = null; // ownership transferred
+                                else _discoveryFailed = true;
+                            }
+                            catch (COMException ex) { complete = false; Debug.WriteLine(ex.Message); }
+                            catch (InvalidComObjectException ex) { complete = false; Debug.WriteLine(ex.Message); }
+                            finally { SafeReleaseComObject(device); }
+                        }
+                        // Incomplete enumeration is not evidence of removal.
+                        if (complete)
+                        {
+                            for (int i = _guardedDevices.Count - 1; i >= 0; i--)
+                            {
+                                var device = _guardedDevices[i];
+                                if (active.Contains(device.DeviceId)) continue;
+                                _seenDeviceIds.Remove(device.DeviceId);
+                                device.Dispose();
+                                _guardedDevices.RemoveAt(i);
+                                _structureChangedSincePublish = true;
+                            }
+                        }
+                        else _discoveryFailed = true;
+                    }
+                    catch (COMException ex) { _discoveryFailed = true; Debug.WriteLine(ex.Message); ReinitializeEnumerator(); }
+                    catch (InvalidComObjectException ex) { _discoveryFailed = true; Debug.WriteLine(ex.Message); ReinitializeEnumerator(); }
+                    finally
+                    {
+                        SafeReleaseComObject(collection);
+                        scanSucceeded = !_discoveryFailed;
+                        publish = _structureChangedSincePublish || defaultBefore != _defaultDeviceId;
+                        _structureChangedSincePublish = false;
+                        // Even a failed scan must publish a preceding invalidation/removal.
+                        if (publish) RaiseDevicesChanged();
+                    }
+                }
+            }
+            finally
+            {
+                PublishEvents();
+                if (publish) _configStore.Save(_config);
+                var completed = DiscoveryCompleted;
+                if (completed != null) completed(scanSucceeded);
+            }
+        }
 
-                // Set when the guarded set itself changes: an endpoint attaches, or one goes away.
-                // Volume-only re-capping happens on every scan but must not be published, otherwise
-                // each scan rewrites settings.json and rebuilds the UI device list.
-                bool structureChanged = false;
-                bool defaultChanged = false;
+        private bool AttachEndpoint(IMMDevice device, string id)
+        {
+            string name = GetDeviceProperty(device, CoreAudioConstants.PKEY_Device_FriendlyName);
+            string interfaceName = GetDeviceProperty(device, CoreAudioConstants.PKEY_Interface_FriendlyName);
+            string description = GetDeviceProperty(device, CoreAudioConstants.PKEY_DeviceDesc);
+            if (string.IsNullOrEmpty(name)) name = !string.IsNullOrEmpty(interfaceName)
+                ? (string.IsNullOrEmpty(description) ? interfaceName : interfaceName + " (" + description + ")")
+                : (string.IsNullOrEmpty(description) ? "Audio Endpoint" : description);
+            object volumeObject = null;
+            GuardedDevice guarded = null;
+            bool attached = false;
+            try
+            {
+                Guid iid = CoreAudioConstants.IID_IAudioEndpointVolume;
+                int hr = device.Activate(ref iid, CoreAudioConstants.CLSCTX_ALL, IntPtr.Zero, out volumeObject);
+                var volume = volumeObject as IAudioEndpointVolume;
+                if (hr != 0 || volume == null) return false;
+                guarded = new GuardedDevice
+                {
+                    DeviceId = id, DeviceName = name, Description = string.IsNullOrEmpty(description) ? interfaceName : description,
+                    QueueNotification = _publications.Enqueue,
+                    VolumeControl = volume, Config = _configStore.GetOrCreateDeviceConfig(_config, id, name)
+                };
+                volumeObject = null;
+                if (!guarded.Config.Enabled)
+                {
+                    float current;
+                    if (volume.GetMasterVolumeLevelScalar(out current) != 0) return false;
+                    if (!float.IsNaN(current) && !float.IsInfinity(current)) guarded.CurrentVolume = current;
+                }
+                if (_seenDeviceIds.Add(id)) guarded.SafePlugInUntil = Deadline(SafePlugInGraceMs);
+                float target = IsWithinSafePlugInWindow(guarded)
+                    ? Math.Min(guarded.Config.SafePlugInVol, guarded.Config.MaxLimit) : guarded.Config.MaxLimit;
+                var result = ApplyVolumeCeiling(guarded, target);
+                if (result.Outcome == VolumeAdjustmentOutcome.RecoveryRequested) return false;
+                RegisterVolumeCallback(guarded);
+                guarded.DeviceCom = device;
+                _guardedDevices.Add(guarded);
+                attached = true;
+                _structureChangedSincePublish = true;
+                if (result.Outcome == VolumeAdjustmentOutcome.Lowered)
+                    RaiseVolumeClamped(guarded, result.OldVolume, result.NewVolume);
+                return true;
+            }
+            finally
+            {
+                SafeReleaseComObject(volumeObject);
+                if (!attached && guarded != null) guarded.Dispose();
+                if (!attached) _seenDeviceIds.Remove(id);
+            }
+        }
 
-                IMMDeviceCollection col = null;
+        private void RegisterVolumeCallback(GuardedDevice device)
+        {
+            if (device.CallbackRegistered) return;
+            if (device.CallbackInstance == null)
+                device.CallbackInstance = new AudioEndpointCallback(data => HandleVolumeNotification(device, data));
+            try { device.CallbackRegistered = device.VolumeControl.RegisterControlChangeNotify(device.CallbackInstance) == 0; }
+            catch (COMException ex) { Debug.WriteLine(ex.Message); }
+            catch (InvalidComObjectException ex) { Debug.WriteLine(ex.Message); }
+            // Keep the device attached: the watchdog still protects it while registration retries.
+            if (!device.CallbackRegistered) _discoveryFailed = true;
+        }
+
+        public void RequestScan()
+        {
+            if (Interlocked.CompareExchange(ref _resyncPending, 1, 0) != 0) return;
+            if (!_workerRunning || _isDisposed) { Interlocked.Exchange(ref _resyncPending, 0); return; }
+            PostWork(() =>
+            {
                 try
                 {
-                    int hr = _enumerator.EnumAudioEndpoints(
-                        CoreAudioConstants.E_RENDER,
-                        CoreAudioConstants.DEVICE_STATE_ACTIVE,
-                        out col
-                    );
-
-                    if (hr != 0 || col == null)
-                    {
-                        ReinitializeEnumerator();
-                        if (_enumerator != null)
-                        {
-                            _enumerator.EnumAudioEndpoints(
-                                CoreAudioConstants.E_RENDER,
-                                CoreAudioConstants.DEVICE_STATE_ACTIVE,
-                                out col
-                            );
-                        }
-                    }
-
-                    if (col == null) return;
-
-                    string defaultIdBefore = _defaultDeviceId;
-                    RefreshDefaultDeviceId();
-                    defaultChanged = !string.Equals(defaultIdBefore, _defaultDeviceId, StringComparison.OrdinalIgnoreCase);
-
-                    uint count = 0;
-                    col.GetCount(out count);
-
-                    var currentActiveIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-                    for (uint i = 0; i < count; i++)
-                    {
-                        IMMDevice dev = null;
-                        col.Item(i, out dev);
-                        if (dev == null) continue;
-
-                        string devId = null;
-                        dev.GetId(out devId);
-                        if (string.IsNullOrEmpty(devId))
-                        {
-                            SafeReleaseComObject(dev);
-                            continue;
-                        }
-
-                        currentActiveIds.Add(devId);
-
-                        // Check if already hooked
-                        var existing = _guardedDevices.Find(d => string.Equals(d.DeviceId, devId, StringComparison.OrdinalIgnoreCase));
-                        if (existing != null)
-                        {
-                            SafeReleaseComObject(dev);
-                            if (_seenDeviceIds.Add(devId))
-                            {
-                                existing.SafePlugInUntilUtc = DateTime.UtcNow.AddMilliseconds(SafePlugInGraceMs);
-                            }
-
-                            // Inside the plug-in grace window, hold the endpoint at the safe plug-in
-                            // limit so Windows' restore of the previous volume cannot undo it. Outside
-                            // the window, re-assert the ceiling. Both are caps and can only lower volume.
-                            float existingTarget = IsWithinSafePlugInWindow(existing)
-                                ? Math.Min(existing.Config.SafePlugInVol, existing.Config.MaxLimit)
-                                : existing.Config.MaxLimit;
-
-                            var existingOutcome = ApplyVolumeCeiling(existing, existingTarget);
-                            if (existingOutcome.Outcome == VolumeAdjustmentOutcome.Lowered)
-                            {
-                                RaiseVolumeClamped(existing, existingOutcome.OldVolume, existingOutcome.NewVolume);
-                            }
-                            continue;
-                        }
-
-                        // Read complete friendly names
-                        string fullFriendlyName = GetDeviceProperty(dev, CoreAudioConstants.PKEY_Device_FriendlyName);
-                        string interfaceName = GetDeviceProperty(dev, CoreAudioConstants.PKEY_Interface_FriendlyName);
-                        string adapterDesc = GetDeviceProperty(dev, CoreAudioConstants.PKEY_DeviceDesc);
-
-                        string chosenName;
-                        if (!string.IsNullOrEmpty(fullFriendlyName))
-                        {
-                            chosenName = fullFriendlyName;
-                        }
-                        else if (!string.IsNullOrEmpty(interfaceName) && !string.IsNullOrEmpty(adapterDesc))
-                        {
-                            chosenName = string.Format("{0} ({1})", interfaceName, adapterDesc);
-                        }
-                        else if (!string.IsNullOrEmpty(interfaceName))
-                        {
-                            chosenName = interfaceName;
-                        }
-                        else if (!string.IsNullOrEmpty(adapterDesc))
-                        {
-                            chosenName = adapterDesc;
-                        }
-                        else
-                        {
-                            chosenName = "Audio Endpoint";
-                        }
-                        // Retrieve or create per-device config
-                        var devConfig = _configStore.GetOrCreateDeviceConfig(_config, devId, chosenName);
-
-                        // Activate volume endpoint
-                        Guid iid = CoreAudioConstants.IID_IAudioEndpointVolume;
-                        object volObj = null;
-                        int actHr = dev.Activate(ref iid, CoreAudioConstants.CLSCTX_ALL, IntPtr.Zero, out volObj);
-                        var vol = volObj as IAudioEndpointVolume;
-
-                        if (actHr != 0 || vol == null)
-                        {
-                            SafeReleaseComObject(dev);
-                            continue;
-                        }
-
-                        var guarded = new GuardedDevice
-                        {
-                            DeviceId = devId,
-                            DeviceName = chosenName,
-                            Description = !string.IsNullOrEmpty(adapterDesc) ? adapterDesc : interfaceName,
-                            DeviceCom = dev,
-                            VolumeControl = vol,
-                            Config = devConfig
-                        };
-
-                        // Read the current hardware level so the UI shows a real value before any
-                        // adjustment is attempted.
-                        float curVol = 0f;
-                        int ghr = vol.GetMasterVolumeLevelScalar(out curVol);
-                        if (ghr == 0 && !float.IsNaN(curVol) && !float.IsInfinity(curVol))
-                        {
-                            guarded.CurrentVolume = curVol;
-                        }
-
-                        // Freshly connected endpoints are capped at the safe plug-in level, and stay
-                        // capped for a short grace window so Windows' restore of the previous volume
-                        // cannot silently undo it. Endpoints we already knew about are re-capped at
-                        // their ceiling. Both are caps, not targets: if the hardware comes up quieter
-                        // than the cap, it is left alone.
-                        bool isNewDevice = !_seenDeviceIds.Contains(devId);
-                        _seenDeviceIds.Add(devId);
-
-                        if (isNewDevice)
-                        {
-                            guarded.SafePlugInUntilUtc = DateTime.UtcNow.AddMilliseconds(SafePlugInGraceMs);
-                        }
-
-                        float scanTarget = isNewDevice
-                            ? Math.Min(devConfig.SafePlugInVol, devConfig.MaxLimit)
-                            : devConfig.MaxLimit;
-
-                        var scanOutcome = ApplyVolumeCeiling(guarded, scanTarget);
-                        if (scanOutcome.Outcome == VolumeAdjustmentOutcome.RecoveryRequested)
-                        {
-                            guarded.Dispose();
-                            continue;
-                        }
-                        if (scanOutcome.Outcome == VolumeAdjustmentOutcome.Lowered)
-                        {
-                            RaiseVolumeClamped(guarded, scanOutcome.OldVolume, scanOutcome.NewVolume);
-                        }
-
-                        // Register COM volume callback
-                        var callback = new AudioEndpointCallback(data => HandleVolumeNotification(guarded, data));
-                        guarded.CallbackInstance = callback;
-                        vol.RegisterControlChangeNotify(callback);
-
-                        _guardedDevices.Add(guarded);
-                        structureChanged = true;
-                    }
-
-                    // Remove any devices that were disconnected.
-                    // The seen-device set must be pruned in lockstep, otherwise it grows without
-                    // bound and, worse, a device that is re-attached later is still considered
-                    // "already known" and would miss its safe plug-in treatment.
-                    for (int i = _guardedDevices.Count - 1; i >= 0; i--)
-                    {
-                        var g = _guardedDevices[i];
-                        if (!currentActiveIds.Contains(g.DeviceId))
-                        {
-                            _seenDeviceIds.Remove(g.DeviceId);
-                            g.Dispose();
-                            _guardedDevices.RemoveAt(i);
-                            structureChanged = true;
-                        }
-                    }
+                    if (Interlocked.Exchange(ref _hardwareChangePending, 0) != 0)
+                        lock (_syncRoot) _discoveryUntil = Deadline(SafePlugInGraceMs);
+                    ScanDevices();
                 }
                 finally
                 {
-                    SafeReleaseComObject(col);
+                    Interlocked.Exchange(ref _resyncPending, 0);
+                    if (Interlocked.CompareExchange(ref _hardwareChangePending, 0, 0) != 0) RequestScan();
                 }
-
-                _structureChangedSincePublish |= structureChanged;
-                if (structureChanged)
-                    Interlocked.Exchange(ref _discoveryObservedChange, 1);
-
-                // Publish only when the device set or the default endpoint actually changed. A scan
-                // that merely re-asserted existing caps has nothing new to tell anyone.
-                if (!_structureChangedSincePublish && !defaultChanged) return;
-
-                _structureChangedSincePublish = false;
-                _configStore.Save(_config);
-                RaiseDevicesChanged();
-            }
+            });
         }
 
         private void OnHardwareDevicesChanged()
         {
-            // One work item keeps the ordering explicit: open the retry window, then scan. If that
-            // scan finds the endpoint Windows was re-indexing, the next tick stops retrying.
-            // Attached endpoints are already protected by the watchdog throughout the grace window,
-            // so nothing here may sleep on the sole recovery worker.
-            PostWork(() =>
-            {
-                if (_isDisposed) return;
-
-                Interlocked.Exchange(ref _discoveryObservedChange, 0);
-
-                lock (_syncRoot)
-                {
-                    if (_isDisposed) return;
-                    _discoveryUntilUtc = DateTime.UtcNow.AddMilliseconds(SafePlugInGraceMs);
-                    if (_discoveryTimer == null)
-                        _discoveryTimer = new Timer(DiscoveryRetryTick, null, DiscoveryRetryIntervalMs, DiscoveryRetryIntervalMs);
-                    else
-                        _discoveryTimer.Change(DiscoveryRetryIntervalMs, DiscoveryRetryIntervalMs);
-                }
-
-                ScanDevices();
-            });
+            Interlocked.Exchange(ref _hardwareChangePending, 1);
+            RequestScan();
         }
 
         private void DiscoveryRetryTick(object state)
         {
-            // Stop once a scan has already reported a change: the endpoint has appeared, and the
-            // watchdog covers it from here. Otherwise keep retrying until the window closes.
-            if (Interlocked.CompareExchange(ref _discoveryObservedChange, 1, 1) == 1)
-            {
-                StopDiscoveryRetries();
-                return;
-            }
-
             lock (_syncRoot)
             {
                 if (_isDisposed) return;
-                if (DateTime.UtcNow >= _discoveryUntilUtc)
-                {
-                    StopDiscoveryRetries();
-                    return;
-                }
+                if (_enumerator != null && _notificationsRegistered && !_discoveryFailed
+                    && Stopwatch.GetTimestamp() >= _discoveryUntil) return;
             }
-
-            ScanDevices();
-        }
-
-        private void StopDiscoveryRetries()
-        {
-            lock (_syncRoot)
-            {
-                if (_discoveryTimer != null)
-                    _discoveryTimer.Change(Timeout.Infinite, Timeout.Infinite);
-            }
+            RequestScan();
         }
 
         private void OnDeviceDisconnected(string deviceId)
@@ -569,7 +476,7 @@ namespace EarGuard.Audio
                     _seenDeviceIds.Remove(deviceId);
                     var existing = _guardedDevices.Find(d => string.Equals(d.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
                     if (existing != null)
-                        existing.SafePlugInUntilUtc = DateTime.UtcNow.AddMilliseconds(SafePlugInGraceMs);
+                        existing.SafePlugInUntil = Deadline(SafePlugInGraceMs);
                 }
             });
         }
@@ -588,9 +495,7 @@ namespace EarGuard.Audio
             try
             {
             if (_isDisposed || guarded == null || guarded.Config == null) return;
-
-            // Prioritize incoming COM callback thread under Pro-Audio MMCSS
-            EnsureThreadMmcss();
+            guarded.QueueNotification = _publications.Enqueue;
 
             float newVol = data.fMasterVolume;
 
@@ -629,12 +534,13 @@ namespace EarGuard.Audio
             finally
             {
                 Monitor.Exit(_syncRoot);
+                PublishEvents();
             }
         }
 
         private static bool IsWithinSafePlugInWindow(GuardedDevice device)
         {
-            return device != null && DateTime.UtcNow < device.SafePlugInUntilUtc;
+            return device != null && Stopwatch.GetTimestamp() < device.SafePlugInUntil;
         }
 
         private void WatchdogTick(object state)
@@ -663,6 +569,7 @@ namespace EarGuard.Audio
                 }
 
             }
+            PublishEvents();
         }
 
         public void HandleSystemResume()
@@ -678,7 +585,7 @@ namespace EarGuard.Audio
                     if (guarded.VolumeControl == null || guarded.Config == null || !guarded.Config.Enabled)
                         continue;
 
-                    guarded.SafePlugInUntilUtc = DateTime.UtcNow.AddMilliseconds(SafePlugInGraceMs);
+                    guarded.SafePlugInUntil = Deadline(SafePlugInGraceMs);
                     float target = Math.Min(guarded.Config.SafePlugInVol, guarded.Config.MaxLimit);
                     var outcome = ApplyVolumeCeiling(guarded, target);
                     if (outcome.Outcome == VolumeAdjustmentOutcome.Lowered)
@@ -690,9 +597,10 @@ namespace EarGuard.Audio
                 // Clear seen devices so that ScanDevices treats re-enumerating endpoints as freshly plugged in
                 _seenDeviceIds.Clear();
 
-                // Run instant scan to detect and clamp re-initialized audio endpoints immediately
-                ScanDevices();
+                _discoveryUntil = Deadline(SafePlugInGraceMs);
+                RequestScan();
             }
+            PublishEvents();
         }
 
         private void TriggerFastResync(string deviceIdToInvalidate = null)
@@ -700,6 +608,8 @@ namespace EarGuard.Audio
             lock (_syncRoot)
             {
                 if (_isDisposed) return;
+                // A queued scan may already own the request slot; retain timer recovery.
+                _discoveryFailed = true;
 
                 if (!string.IsNullOrEmpty(deviceIdToInvalidate))
                 {
@@ -709,6 +619,7 @@ namespace EarGuard.Audio
                         {
                             _guardedDevices[i].Dispose();
                             _guardedDevices.RemoveAt(i);
+                            _structureChangedSincePublish = true;
                             break;
                         }
                     }
@@ -727,25 +638,13 @@ namespace EarGuard.Audio
                             _seenDeviceIds.Remove(g.DeviceId);
                             g.Dispose();
                             _guardedDevices.RemoveAt(i);
+                            _structureChangedSincePublish = true;
                         }
                     }
                 }
             }
 
-            if (Interlocked.CompareExchange(ref _resyncPending, 1, 0) == 0)
-            {
-                PostWork(() =>
-                {
-                    try
-                    {
-                        ScanDevices();
-                    }
-                    finally
-                    {
-                        Interlocked.Exchange(ref _resyncPending, 0);
-                    }
-                });
-            }
+            RequestScan();
         }
 
         /// <summary>
@@ -788,28 +687,32 @@ namespace EarGuard.Audio
             }
         }
 
-        private void ReinitializeEnumerator()
+        private void RegisterNotifications()
         {
-            try
+            if (_notificationsRegistered || _enumerator == null) return;
+            if (_notificationClient == null)
             {
-                if (_enumerator != null && _notificationClient != null)
-                {
-                    try { _enumerator.UnregisterEndpointNotificationCallback(_notificationClient); } catch { }
-                }
-                if (_enumerator != null)
-                {
-                    try { Marshal.ReleaseComObject(_enumerator); } catch { }
-                    _enumerator = null;
-                }
-                _enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
                 _notificationClient = new AudioNotificationClient(OnHardwareDevicesChanged);
                 _notificationClient.DeviceDisconnected += OnDeviceDisconnected;
-                _enumerator.RegisterEndpointNotificationCallback(_notificationClient);
             }
-            catch (Exception ex)
+            _notificationsRegistered = _enumerator.RegisterEndpointNotificationCallback(_notificationClient) == 0;
+        }
+
+        private void ReinitializeEnumerator()
+        {
+            if (_enumerator != null)
             {
-                System.Diagnostics.Debug.WriteLine("Failed to reinitialize enumerator: " + ex.Message);
+                try
+                {
+                    if (_notificationsRegistered) _enumerator.UnregisterEndpointNotificationCallback(_notificationClient);
+                }
+                catch (COMException ex) { Debug.WriteLine(ex.Message); }
+                catch (InvalidComObjectException ex) { Debug.WriteLine(ex.Message); }
+                finally { SafeReleaseComObject(_enumerator); _enumerator = null; }
             }
+            _notificationsRegistered = false;
+            try { _enumerator = _createEnumerator(); }
+            catch (COMException ex) { Debug.WriteLine("Enumerator unavailable: " + ex.Message); }
         }
 
         public static bool IsRpcErrorCode(int hr)
@@ -842,6 +745,12 @@ namespace EarGuard.Audio
         /// </summary>
         public VolumeAdjustmentResult ApplyVolumeCeiling(GuardedDevice guarded, float targetScalar)
         {
+            try { return ApplyVolumeCeilingCore(guarded, targetScalar); }
+            finally { PublishEvents(); }
+        }
+
+        private VolumeAdjustmentResult ApplyVolumeCeilingCore(GuardedDevice guarded, float targetScalar)
+        {
             lock (_syncRoot)
             {
             if (_isDisposed || guarded == null || guarded.VolumeControl == null || guarded.Config == null)
@@ -849,6 +758,7 @@ namespace EarGuard.Audio
                 return new VolumeAdjustmentResult(VolumeAdjustmentOutcome.Skipped, 0f, 0f);
             }
 
+            guarded.QueueNotification = _publications.Enqueue;
             if (!guarded.Config.Enabled)
             {
                 return new VolumeAdjustmentResult(VolumeAdjustmentOutcome.Skipped, guarded.CurrentVolume, guarded.CurrentVolume);
@@ -889,7 +799,9 @@ namespace EarGuard.Audio
             // level or re-enables protection on a quiet device.
             if (current <= targetScalar + VolumeEpsilon)
             {
+                float previous = guarded.CurrentVolume;
                 guarded.CurrentVolume = current;
+                if (guarded.CurrentVolume != previous) RaiseVolumeChanged(guarded);
                 return new VolumeAdjustmentResult(VolumeAdjustmentOutcome.AlreadySafe, current, current);
             }
 
@@ -953,9 +865,9 @@ namespace EarGuard.Audio
         private static string GetDeviceProperty(IMMDevice dev, PROPERTYKEY key)
         {
             if (dev == null) return string.Empty;
+            IPropertyStore store = null;
             try
             {
-                IPropertyStore store = null;
                 int hr = dev.OpenPropertyStore(CoreAudioConstants.STGM_READ, out store);
                 if (hr == 0 && store != null)
                 {
@@ -971,11 +883,12 @@ namespace EarGuard.Audio
                     finally
                     {
                         CoreAudioConstants.PropVariantClear(ref pv);
-                        Marshal.ReleaseComObject(store);
+
                     }
                 }
             }
-            catch { }
+            catch (COMException ex) { Debug.WriteLine(ex.Message); }
+            finally { SafeReleaseComObject(store); }
             return string.Empty;
         }
 
@@ -984,7 +897,7 @@ namespace EarGuard.Audio
             var handler = VolumeClamped;
             if (handler != null)
             {
-                handler(this, new VolumeClampedEventArgs(dev, oldVol, clampedVol));
+                _publications.Enqueue(() => handler(this, new VolumeClampedEventArgs(dev, oldVol, clampedVol)));
             }
         }
 
@@ -993,7 +906,7 @@ namespace EarGuard.Audio
             var handler = DevicesChanged;
             if (handler != null)
             {
-                handler(this, EventArgs.Empty);
+                _publications.Enqueue(() => handler(this, EventArgs.Empty));
             }
         }
 
@@ -1002,16 +915,35 @@ namespace EarGuard.Audio
             var handler = VolumeChanged;
             if (handler != null)
             {
-                handler(this, dev);
+                _publications.Enqueue(() => handler(this, dev));
             }
+        }
+
+        private void PublishEvents()
+        {
+            if (Monitor.IsEntered(_syncRoot)) return;
+            do
+            {
+                // One consumer preserves event order; competing writers never wait on subscribers.
+                if (Interlocked.CompareExchange(ref _publishingEvents, 1, 0) != 0) return;
+                try
+                {
+                    Action publication;
+                    while (_publications.TryDequeue(out publication)) publication();
+                }
+                finally { Interlocked.Exchange(ref _publishingEvents, 0); }
+                // A producer may have queued work while this consumer was finishing its drain.
+            } while (!_publications.IsEmpty);
         }
 
         public void Dispose()
         {
+            Thread worker;
             lock (_syncRoot)
             {
                 if (_isDisposed) return;
                 _isDisposed = true;
+                worker = _workerThread;
 
                 if (_watchdogTimer != null)
                 {
@@ -1029,16 +961,19 @@ namespace EarGuard.Audio
                 {
                     try { _workQueue.CompleteAdding(); } catch { }
                 }
-                if (_workerThread != null && _workerThread.IsAlive)
-                {
-                    _workerThread.Join(500);
-                    _workerThread = null;
-                }
-                if (_workQueue != null)
-                {
-                    try { _workQueue.Dispose(); } catch { }
-                    _workQueue = null;
-                }
+            }
+            // The worker can need the engine lock while exiting. Never join under that lock.
+            if (worker == Thread.CurrentThread) return; // worker finally owns cleanup below
+            if (worker != null) worker.Join();
+            Cleanup();
+        }
+
+        private void Cleanup()
+        {
+            lock (_syncRoot)
+            {
+                if (_workQueue != null) { _workQueue.Dispose(); _workQueue = null; }
+                _workerThread = null;
                 if (_enumerator != null && _notificationClient != null)
                 {
                     try

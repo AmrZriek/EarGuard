@@ -22,6 +22,20 @@ namespace EarGuard.Config
         // be written concurrently. Re-entrant because EnsureValid is called from within Save.
         private readonly object _saveSync = new object();
 
+        private readonly object _commitSync = new object();
+        internal object SyncRoot { get { return _saveSync; } }
+        public bool SettingsSaved { get; private set; }
+        public event EventHandler SaveStatusChanged;
+
+        public void Update(EarGuardConfig config, Action change)
+        {
+            lock (_saveSync)
+            {
+                change();
+                EnsureValid(config);
+            }
+        }
+
         public string ConfigFilePath { get; private set; }
 
         public ConfigStore()
@@ -41,11 +55,12 @@ namespace EarGuard.Config
             IStartupRegistrar startupRegistrar,
             ILegacyStartupRegistration legacyStartupRegistration,
             string executablePath,
-            IApplicationInstaller applicationInstaller)
+            IApplicationInstaller applicationInstaller, string settingsPath = null)
         {
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string earGuardDir = Path.Combine(appData, "EarGuard");
-            ConfigFilePath = Path.Combine(earGuardDir, "settings.json");
+            SettingsSaved = true;
+            ConfigFilePath = settingsPath ?? Path.Combine(earGuardDir, "settings.json");
             _startupRegistrar = startupRegistrar ?? new TaskSchedulerStartupRegistrar();
             _legacyStartupRegistration = legacyStartupRegistration ?? new LegacyRunStartupRegistration();
             _applicationInstaller = applicationInstaller ?? new ApplicationInstaller();
@@ -85,22 +100,10 @@ namespace EarGuard.Config
         {
             string targetPath = customPath ?? ConfigFilePath;
             EarGuardConfig config;
-            if (!File.Exists(targetPath))
+            lock (_commitSync)
             {
-                config = EarGuardConfig.CreateDefault();
-            }
-            else
-            {
-                try
-                {
-                    string json = File.ReadAllText(targetPath);
-                    var serializer = new JavaScriptSerializer();
-                    config = serializer.Deserialize<EarGuardConfig>(json) ?? EarGuardConfig.CreateDefault();
-                }
-                catch (Exception)
-                {
+                if (!TryRead(targetPath, out config) && !TryRead(targetPath + ".bak", out config))
                     config = EarGuardConfig.CreateDefault();
-                }
             }
 
             // Synchronize the preference with either the current task or the legacy Run registration.
@@ -114,32 +117,73 @@ namespace EarGuard.Config
             return config;
         }
 
-        public void Save(EarGuardConfig config, string customPath = null)
+        private static bool TryRead(string path, out EarGuardConfig config)
+        {
+            config = null;
+            try
+            {
+                config = new JavaScriptSerializer().Deserialize<EarGuardConfig>(File.ReadAllText(path));
+                return config != null;
+            }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+            catch (ArgumentException) { return false; }
+            catch (InvalidOperationException) { return false; }
+            catch (FormatException) { return false; }
+            catch (OverflowException) { return false; }
+            catch (InvalidCastException) { return false; }
+            catch (Exception ex)
+            {
+                // Framework type converters wrap malformed numeric values in Exception.
+                if (ex.InnerException is FormatException || ex.InnerException is OverflowException
+                    || ex.InnerException is InvalidCastException) return false;
+                throw;
+            }
+        }
+
+        public bool Save(EarGuardConfig config, string customPath = null)
         {
             if (config == null) throw new ArgumentNullException("config");
-
-            // Serialize store operations, not arbitrary caller assignments to config fields.
-            // Validation, serialization and writing must not interleave with another save
-            // or a device addition through this store.
-            lock (_saveSync)
+            bool saved;
+            // Take snapshots in commit order. Disk I/O never holds the shared config/engine lock.
+            lock (_commitSync)
             {
-                EnsureValid(config);
-
-                string targetPath = customPath ?? ConfigFilePath;
-                string dir = Path.GetDirectoryName(targetPath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                string json;
+                lock (_saveSync)
                 {
-                    Directory.CreateDirectory(dir);
+                    EnsureValid(config);
+                    json = FormatJson(new JavaScriptSerializer().Serialize(config));
                 }
-
-                var serializer = new JavaScriptSerializer();
-                string json = serializer.Serialize(config);
-
-                // Simple formatting for readability
-                json = FormatJson(json);
-
-                File.WriteAllText(targetPath, json);
+                string targetPath = customPath ?? ConfigFilePath;
+                try
+                {
+                    string dir = Path.GetDirectoryName(targetPath);
+                    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                    string temporary = targetPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                    using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        byte[] bytes = new System.Text.UTF8Encoding(false).GetBytes(json);
+                        stream.Write(bytes, 0, bytes.Length);
+                        stream.Flush(true);
+                    }
+                    if (File.Exists(targetPath))
+                    {
+                        EarGuardConfig previous;
+                        // Never rotate corrupt input over the last usable backup; preserve it separately.
+                        string backup = TryRead(targetPath, out previous) ? targetPath + ".bak"
+                            : targetPath + ".corrupt." + Guid.NewGuid().ToString("N");
+                        File.Replace(temporary, targetPath, backup);
+                    }
+                    else File.Move(temporary, targetPath);
+                    saved = true;
+                }
+                catch (IOException) { saved = false; }
+                catch (UnauthorizedAccessException) { saved = false; }
+                SettingsSaved = saved;
             }
+            var handler = SaveStatusChanged;
+            if (handler != null) handler(this, EventArgs.Empty);
+            return saved;
         }
 
         public void EnsureValid(EarGuardConfig config)
@@ -255,7 +299,7 @@ namespace EarGuard.Config
 
             if (config != null && !config.LaunchOnStartup)
             {
-                config.LaunchOnStartup = true;
+                Update(config, () => config.LaunchOnStartup = true);
                 Save(config);
             }
 
@@ -291,11 +335,12 @@ namespace EarGuard.Config
             var sb = new System.Text.StringBuilder();
             int indent = 0;
             bool inQuote = false;
+            int backslashes = 0;
 
             for (int i = 0; i < json.Length; i++)
             {
                 char ch = json[i];
-                if (ch == '\"' && (i == 0 || json[i - 1] != '\\'))
+                if (ch == '\"' && backslashes % 2 == 0)
                 {
                     inQuote = !inQuote;
                     sb.Append(ch);
@@ -335,6 +380,7 @@ namespace EarGuard.Config
                             break;
                     }
                 }
+                backslashes = ch == '\\' ? backslashes + 1 : 0;
             }
             return sb.ToString();
         }

@@ -14,6 +14,16 @@ namespace EarGuard.Tests
         public static void RunAll()
         {
             Console.WriteLine("[TEST] Running AudioEngineTests...");
+            Test_DiscoveryRecoveryAndIncompleteEnumeration();
+            Test_RecoveryDuringQueuedScan();
+            Test_DisabledAttachmentReadsVolume();
+            Test_DiscoveryCompletionIncludesEmptyAndFailedScans();
+            Test_RegistrationRetryAndStaggeredArrivals();
+            Test_PollingPublishesVolumeDuringCallbackRecovery();
+            Test_ConcurrentPublications_PreserveVolumeOrder();
+            Test_ReentrantPublication_DrainsNewEvents();
+            Test_SlowAndFailedPersistenceDoNotBlockProtection();
+            Test_ShutdownJoinsOutsideEngineLock();
             Test_ClampingDecision_TriggersOnlyWhenAppropriate();
             Test_ClampingDecision_IgnoresOwnContextGuid();
             Test_ClampingDecision_RespectsUnprotectedDevice();
@@ -36,8 +46,364 @@ namespace EarGuard.Tests
             Test_PowerBroadcastConstants_ValidValues();
             Test_RpcRecovery_DetectionLogic();
             Test_HandleSystemResume_LocksEndpointsToSafePlugInVolume();
-            Test_MMCSS_WorkerThreadInitializes();
+            // Real MMCSS/audio startup is covered only by opt-in integration.
             Console.WriteLine("[PASS] All AudioEngineTests passed!");
+        }
+
+        private static void Test_DiscoveryCompletionIncludesEmptyAndFailedScans()
+        {
+            var enumerator = new ScriptedEnumerator();
+            using (var engine = new AudioEngine(TestEnvironment.Store(), EarGuardConfig.CreateDefault(), () => enumerator))
+            {
+                var queue = EnableControlledQueue(engine);
+                int completed = 0;
+                bool succeeded = false;
+                engine.DiscoveryCompleted += success => { completed++; succeeded = success; };
+                engine.RequestScan();
+                Assert(completed == 0, "Queueing discovery must not signal completion");
+                DrainOne(queue);
+                Assert(completed == 1 && succeeded && engine.GuardedDevices.Count == 0,
+                    "Empty successful discovery must signal completion for an explicit hardware skip");
+                enumerator.CountHr = -1;
+                engine.RequestScan(); DrainOne(queue);
+                Assert(completed == 2 && !succeeded, "Failed discovery must not report hardware success");
+            }
+        }
+
+        private static void Test_RecoveryDuringQueuedScan()
+        {
+            var enumerator = new ScriptedEnumerator();
+            enumerator.Ids.Add("first");
+            using (var engine = new AudioEngine(TestEnvironment.Store(), EarGuardConfig.CreateDefault(), () => enumerator))
+            {
+                var queue = EnableControlledQueue(engine);
+                engine.RequestScan(); DrainOne(queue);
+                SetEngineField(engine, "_discoveryUntil", 0L);
+                enumerator.Volume.ReadHr = CoreAudioConstants.RPC_E_DISCONNECTED;
+                engine.RequestScan(); DrainOne(queue);
+                Assert(engine.GuardedDevices.Count == 0, "Queued scan must invalidate the failed endpoint");
+                enumerator.Volume.ReadHr = 0;
+                enumerator.Volume.Volume = 0.8f;
+                InvokeEngine(engine, "DiscoveryRetryTick", (object)null); DrainOne(queue);
+                Assert(engine.GuardedDevices.Count == 1 && enumerator.Volume.Volume == 0.05f,
+                    "Recovery during a queued scan must retry after the arrival window and restore protection");
+            }
+        }
+
+        private static void Test_DisabledAttachmentReadsVolume()
+        {
+            var enumerator = new ScriptedEnumerator();
+            enumerator.Ids.Add("disabled");
+            var store = TestEnvironment.Store();
+            var config = EarGuardConfig.CreateDefault();
+            store.GetOrCreateDeviceConfig(config, "disabled", "Disabled").Enabled = false;
+            using (var engine = new AudioEngine(store, config, () => enumerator))
+            {
+                engine.ScanDevices();
+                Assert(engine.GuardedDevices[0].CurrentVolume == 0.2f && enumerator.Volume.WriteCount == 0,
+                    "Disabled attachment must display hardware volume without writing it");
+            }
+        }
+
+        private static void Test_DiscoveryRecoveryAndIncompleteEnumeration()
+        {
+            var enumerator = new ScriptedEnumerator();
+            enumerator.Ids.Add("first");
+            int attempts = 0;
+            using (var engine = new AudioEngine(TestEnvironment.Store(), EarGuardConfig.CreateDefault(), () =>
+            {
+                if (++attempts == 1) throw new COMException("Unavailable", CoreAudioConstants.RPC_S_SERVER_UNAVAILABLE);
+                return enumerator;
+            }))
+            {
+                var queue = EnableControlledQueue(engine);
+                engine.RequestScan(); DrainOne(queue);
+                Assert(engine.GuardedDevices.Count == 0, "Failed initialization must leave recovery possible");
+                InvokeEngine(engine, "DiscoveryRetryTick", (object)null); DrainOne(queue);
+                Assert(attempts == 2 && engine.GuardedDevices.Count == 1, "Null enumerator must recover on retry");
+                enumerator.CountHr = -1; engine.ScanDevices();
+                Assert(engine.GuardedDevices.Count == 1, "Failed GetCount must preserve known endpoints");
+                enumerator.CountHr = 0; enumerator.ItemHr = -1; engine.ScanDevices();
+                Assert(engine.GuardedDevices.Count == 1, "Failed Item must preserve known endpoints");
+                enumerator.ItemHr = 0; enumerator.IdHr = -1; engine.ScanDevices();
+                Assert(engine.GuardedDevices.Count == 1, "Failed GetId must preserve known endpoints");
+                enumerator.IdHr = 0;
+                int changes = 0;
+                engine.DevicesChanged += (sender, args) => changes++;
+                var device = engine.GuardedDevices[0];
+                enumerator.Volume.ReadHr = CoreAudioConstants.RPC_E_DISCONNECTED;
+                engine.ApplyVolumeCeiling(device, 0.3f);
+                enumerator.Ids.Clear(); DrainOne(queue);
+                Assert(engine.GuardedDevices.Count == 0 && changes == 1,
+                    "Invalidation without replacement must publish removal");
+            }
+        }
+
+        private static void Test_RegistrationRetryAndStaggeredArrivals()
+        {
+            var enumerator = new ScriptedEnumerator { RegistrationHr = -1 };
+            enumerator.Volume.RegisterHr = -1;
+            enumerator.Ids.Add("first");
+            using (var engine = new AudioEngine(TestEnvironment.Store(), EarGuardConfig.CreateDefault(), () => enumerator))
+            {
+                var queue = EnableControlledQueue(engine);
+                InvokeEngine(engine, "OnHardwareDevicesChanged"); DrainOne(queue);
+                Assert(engine.GuardedDevices.Count == 1 && !engine.GuardedDevices[0].CallbackRegistered,
+                    "Callback failure must retain watchdog coverage");
+                enumerator.Volume.Volume = 0.9f;
+                InvokeEngine(engine, "WatchdogTick", (object)null);
+                Assert(enumerator.Volume.Volume == 0.05f, "Watchdog must clamp while callback registration fails");
+                enumerator.RegistrationHr = 0;
+                enumerator.Volume.RegisterHr = 0;
+                InvokeEngine(engine, "DiscoveryRetryTick", (object)null); DrainOne(queue);
+                Assert(engine.GuardedDevices[0].CallbackRegistered && enumerator.RegistrationCalls >= 2,
+                    "Both notification registrations must retry");
+                enumerator.Ids.Add("second");
+                InvokeEngine(engine, "DiscoveryRetryTick", (object)null); DrainOne(queue);
+                Assert(engine.GuardedDevices.Count == 2, "First arrival must not close the retry window for a second arrival");
+                SetEngineField(engine, "_discoveryUntil", 0L);
+                InvokeEngine(engine, "DiscoveryRetryTick", (object)null);
+                Assert(queue.Count == 0, "Healthy discovery retries must stop after the monotonic deadline");
+            }
+        }
+
+        private static void Test_PollingPublishesVolumeDuringCallbackRecovery()
+        {
+            var enumerator = new ScriptedEnumerator();
+            enumerator.Ids.Add("first");
+            enumerator.Volume.RegisterHr = -1;
+            var store = TestEnvironment.Store();
+            using (var engine = new AudioEngine(store, EarGuardConfig.CreateDefault(), () => enumerator))
+            {
+                engine.ScanDevices();
+                var device = engine.GuardedDevices[0];
+                device.SafePlugInUntil = 0;
+                int changes = 0;
+                float observed = 0;
+                engine.VolumeChanged += (sender, changed) =>
+                {
+                    Assert(!Monitor.IsEntered(store.SyncRoot), "Volume publication must occur outside the engine lock");
+                    changes++;
+                    observed = changed.CurrentVolume;
+                };
+                int writes = enumerator.Volume.WriteCount;
+                enumerator.Volume.Volume = 0.2f;
+                InvokeEngine(engine, "WatchdogTick", (object)null);
+                Assert(!device.CallbackRegistered && changes == 1 && observed == 0.2f,
+                    "Polling must refresh the live gauge while callback registration fails");
+                InvokeEngine(engine, "WatchdogTick", (object)null);
+                engine.ScanDevices();
+                Assert(changes == 1, "Unchanged polling must not republish volume");
+                enumerator.Volume.Volume = 0.1f;
+                engine.ScanDevices();
+                Assert(changes == 2 && observed == 0.1f && enumerator.Volume.WriteCount == writes,
+                    "Discovery must publish a changed safe volume without writing hardware");
+            }
+        }
+
+        private static void Test_ConcurrentPublications_PreserveVolumeOrder()
+        {
+            var store = TestEnvironment.Store();
+            var endpoint = new FakeEndpointVolume(0.80f);
+            var device = CreateGuardedDevice(endpoint, 0.30f, true);
+            using (var engine = TestEnvironment.Engine(store, EarGuardConfig.CreateDefault()))
+            using (var entered = new ManualResetEvent(false))
+            using (var release = new ManualResetEvent(false))
+            {
+                AttachDevice(engine, device);
+                var delivered = new ConcurrentQueue<string>();
+                float displayed = -1;
+                Exception firstFailure = null, secondFailure = null;
+                engine.VolumeClamped += (sender, args) =>
+                {
+                    Assert(!Monitor.IsEntered(store.SyncRoot), "Clamp publication must stay outside the engine lock");
+                    entered.Set();
+                    Assert(release.WaitOne(5000), "Clamp publication must be released");
+                    displayed = args.ClampedVolume;
+                    delivered.Enqueue("clamp");
+                };
+                engine.VolumeChanged += (sender, changed) =>
+                {
+                    Assert(!Monitor.IsEntered(store.SyncRoot), "Live publication must stay outside the engine lock");
+                    displayed = changed.CurrentVolume;
+                    delivered.Enqueue("live");
+                };
+                var first = new Thread(() =>
+                {
+                    try { InvokeEngine(engine, "WatchdogTick", (object)null); }
+                    catch (Exception ex) { firstFailure = ex; }
+                }) { IsBackground = true };
+                var second = new Thread(() =>
+                {
+                    try { engine.ApplyVolumeCeiling(device, 0.30f); }
+                    catch (Exception ex) { secondFailure = ex; }
+                }) { IsBackground = true };
+                first.Start();
+                bool writerReturned = false;
+                bool liveOvertookClamp = false;
+                try
+                {
+                    Assert(entered.WaitOne(3000), "First publisher must enter its clamp subscriber");
+                    endpoint.Volume = 0.10f;
+                    second.Start();
+                    writerReturned = second.Join(3000);
+                    liveOvertookClamp = !delivered.IsEmpty;
+                }
+                finally
+                {
+                    release.Set();
+                    Assert(first.Join(3000), "First publisher must finish");
+                    if ((second.ThreadState & ThreadState.Unstarted) == 0)
+                        Assert(second.Join(3000), "Second writer must finish");
+                }
+                Assert(firstFailure == null && secondFailure == null, "Concurrent publishers must not throw");
+                Assert(writerReturned, "A busy event publisher must not block another volume transaction");
+                Assert(!liveOvertookClamp, "Newer live volume must not overtake an older clamp publication");
+                string[] order = delivered.ToArray();
+                Assert(order.Length == 2 && order[0] == "clamp" && order[1] == "live",
+                    "Queued publications must be delivered once and in order");
+                Assert(displayed == 0.10f && device.CurrentVolume == 0.10f,
+                    "The final displayed volume must follow the newer hardware observation");
+                InvokeEngine(engine, "WatchdogTick", (object)null);
+                Assert(delivered.Count == 2 && displayed == 0.10f,
+                    "Unchanged polling must retain the correct display without redundant publication");
+            }
+            Console.WriteLine("  [PASS] Concurrent publication ordering and nonblocking volume transaction regression");
+        }
+
+        private static void Test_ReentrantPublication_DrainsNewEvents()
+        {
+            var endpoint = new FakeEndpointVolume(0.80f);
+            var device = CreateGuardedDevice(endpoint, 0.30f, true);
+            using (var engine = TestEnvironment.Engine(TestEnvironment.Store(), EarGuardConfig.CreateDefault()))
+            {
+                AttachDevice(engine, device);
+                int clamped = 0, changed = 0;
+                engine.VolumeClamped += (sender, args) =>
+                {
+                    clamped++;
+                    endpoint.Volume = 0.10f;
+                    engine.ApplyVolumeCeiling(device, 0.30f);
+                };
+                engine.VolumeChanged += (sender, current) => changed++;
+                InvokeEngine(engine, "WatchdogTick", (object)null);
+                Assert(clamped == 1 && changed == 1 && device.CurrentVolume == 0.10f,
+                    "The active publisher must drain events queued by a reentrant subscriber exactly once");
+            }
+        }
+
+        private static void Test_SlowAndFailedPersistenceDoNotBlockProtection()
+        {
+            var store = TestEnvironment.Store();
+            var enumerator = new ScriptedEnumerator();
+            enumerator.Ids.Add("first");
+            using (var engine = new AudioEngine(store, EarGuardConfig.CreateDefault(), () => enumerator))
+            using (var published = new ManualResetEvent(false))
+            {
+                bool publishedUnderLock = false;
+                engine.DevicesChanged += (sender, args) =>
+                {
+                    publishedUnderLock = Monitor.IsEntered(store.SyncRoot);
+                    published.Set();
+                };
+                var commit = typeof(ConfigStore).GetField("_commitSync", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(store);
+                Exception failure = null;
+                var scan = new Thread(() => { try { engine.ScanDevices(); } catch (Exception ex) { failure = ex; } });
+                Monitor.Enter(commit);
+                try
+                {
+                    scan.Start();
+                    Assert(published.WaitOne(3000), "Device publication must precede slow disk work");
+                    Assert(!publishedUnderLock, "Public events must run outside the shared engine lock");
+                    enumerator.Volume.Volume = 0.8f;
+                    var clamp = new Thread(() => engine.ApplyVolumeCeiling(engine.GuardedDevices[0], 0.3f));
+                    clamp.Start();
+                    Assert(clamp.Join(3000), "Blocked persistence must not block a clamp");
+                    Assert(enumerator.Volume.Volume == 0.3f, "Existing endpoint must remain enforceable during a blocked commit");
+                }
+                finally { Monitor.Exit(commit); }
+                Assert(scan.Join(3000) && failure == null, "Scan must finish after disk work is released");
+            }
+            store = TestEnvironment.Store();
+            System.IO.Directory.CreateDirectory(store.ConfigFilePath); // directory blocks atomic file placement
+            enumerator = new ScriptedEnumerator(); enumerator.Ids.Add("first");
+            using (var engine = new AudioEngine(store, EarGuardConfig.CreateDefault(), () => enumerator))
+            {
+                int published = 0;
+                engine.DevicesChanged += (sender, args) => published++;
+                engine.ScanDevices();
+                Assert(!store.SettingsSaved && published == 1 && enumerator.Volume.Volume == 0.05f,
+                    "Failed persistence must neither stop initial clamping nor suppress topology publication");
+            }
+        }
+
+        private static void Test_ShutdownJoinsOutsideEngineLock()
+        {
+            var store = TestEnvironment.Store();
+            var enumerator = new ScriptedEnumerator();
+            var engine = new AudioEngine(store, EarGuardConfig.CreateDefault(), () => enumerator);
+            using (var entered = new ManualResetEvent(false))
+            using (var proceed = new ManualResetEvent(false))
+            {
+                engine.Start();
+                InvokeEngine(engine, "PostWork", new Action(() =>
+                {
+                    entered.Set();
+                    proceed.WaitOne();
+                    lock (store.SyncRoot) { }
+                }));
+                Assert(entered.WaitOne(3000), "Worker must start with a fake enumerator");
+                var worker = (Thread)typeof(AudioEngine).GetField("_workerThread", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(engine);
+                var dispose = new Thread(engine.Dispose);
+                dispose.Start();
+                try
+                {
+                    Assert(SpinWait.SpinUntil(() => !(bool)typeof(AudioEngine).GetField("_workerRunning", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(engine), 3000),
+                        "Disposal must stop accepting work");
+                }
+                finally { proceed.Set(); }
+                Assert(dispose.Join(3000) && !worker.IsAlive, "Disposal must join the worker outside the lock before releasing its queue");
+            }
+            engine.Dispose();
+        }
+
+        private static void DrainOne(BlockingCollection<Action> queue)
+        {
+            Action action;
+            Assert(queue.TryTake(out action), "Expected coalesced discovery work");
+            action();
+        }
+
+        private sealed class ScriptedEnumerator : IMMDeviceEnumerator
+        {
+            public readonly List<string> Ids = new List<string>();
+            public readonly FakeEndpointVolume Volume = new FakeEndpointVolume(0.2f);
+            public int CountHr, ItemHr, IdHr, RegistrationHr, RegistrationCalls;
+            public int EnumAudioEndpoints(int flow, int mask, out IMMDeviceCollection devices)
+            { devices = new ScriptedCollection(this); return 0; }
+            public int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice device)
+            { device = null; return -1; }
+            public int GetDevice(string id, out IMMDevice device) { device = new ScriptedDevice(this, id); return 0; }
+            public int RegisterEndpointNotificationCallback(IMMNotificationClient client) { RegistrationCalls++; return RegistrationHr; }
+            public int UnregisterEndpointNotificationCallback(IMMNotificationClient client) { return 0; }
+        }
+        private sealed class ScriptedCollection : IMMDeviceCollection
+        {
+            private readonly ScriptedEnumerator _owner;
+            public ScriptedCollection(ScriptedEnumerator owner) { _owner = owner; }
+            public int GetCount(out uint count) { count = (uint)_owner.Ids.Count; return _owner.CountHr; }
+            public int Item(uint index, out IMMDevice device)
+            { device = new ScriptedDevice(_owner, _owner.Ids[(int)index]); return _owner.ItemHr; }
+        }
+        private sealed class ScriptedDevice : IMMDevice
+        {
+            private readonly ScriptedEnumerator _owner;
+            private readonly string _id;
+            public ScriptedDevice(ScriptedEnumerator owner, string id) { _owner = owner; _id = id; }
+            public int GetId(out string id) { id = _id; return _owner.IdHr; }
+            public int Activate(ref Guid iid, int context, IntPtr parameters, out object volume) { volume = _owner.Volume; return 0; }
+            public int OpenPropertyStore(int access, out IPropertyStore store) { store = new EmptyPropertyStore(); return 0; }
+            public int GetState(out int state) { state = CoreAudioConstants.DEVICE_STATE_ACTIVE; return 0; }
         }
 
         private static void Assert(bool condition, string message)
@@ -151,8 +517,8 @@ namespace EarGuard.Tests
 
                 var endpoint = new FakeEndpointVolume(current);
                 var device = CreateGuardedDevice(endpoint, ceiling, enabled: true);
-                var configStore = new ConfigStore();
-                using (var engine = new AudioEngine(configStore, EarGuardConfig.CreateDefault()))
+                var configStore = TestEnvironment.Store();
+                using (var engine = TestEnvironment.Engine(configStore, EarGuardConfig.CreateDefault()))
                 {
                     var result = engine.ApplyVolumeCeiling(device, ceiling);
 
@@ -172,8 +538,8 @@ namespace EarGuard.Tests
         {
             var endpoint = new FakeEndpointVolume(0.80f);
             var device = CreateGuardedDevice(endpoint, 0.30f, enabled: true);
-            var configStore = new ConfigStore();
-            using (var engine = new AudioEngine(configStore, EarGuardConfig.CreateDefault()))
+            var configStore = TestEnvironment.Store();
+            using (var engine = TestEnvironment.Engine(configStore, EarGuardConfig.CreateDefault()))
             {
                 var result = engine.ApplyVolumeCeiling(device, 0.30f);
 
@@ -198,8 +564,8 @@ namespace EarGuard.Tests
         {
             var endpoint = new FakeEndpointVolume(1.00f);
             var device = CreateGuardedDevice(endpoint, 0.30f, enabled: false);
-            var configStore = new ConfigStore();
-            using (var engine = new AudioEngine(configStore, EarGuardConfig.CreateDefault()))
+            var configStore = TestEnvironment.Store();
+            using (var engine = TestEnvironment.Engine(configStore, EarGuardConfig.CreateDefault()))
             {
                 var result = engine.ApplyVolumeCeiling(device, 0.30f);
 
@@ -224,8 +590,8 @@ namespace EarGuard.Tests
             var loudDevice = CreateGuardedDevice(loudEndpoint, 0.30f, enabled: true);
             loudDevice.Config.SafePlugInVol = 0.05f;
 
-            var configStore = new ConfigStore();
-            using (var engine = new AudioEngine(configStore, EarGuardConfig.CreateDefault()))
+            var configStore = TestEnvironment.Store();
+            using (var engine = TestEnvironment.Engine(configStore, EarGuardConfig.CreateDefault()))
             {
                 var silentResult = engine.ApplyVolumeCeiling(silentDevice, silentDevice.Config.SafePlugInVol);
                 Assert(silentResult.Outcome == VolumeAdjustmentOutcome.AlreadySafe,
@@ -248,8 +614,8 @@ namespace EarGuard.Tests
         {
             var endpoint = new FakeEndpointVolume(0.20f);
             var device = CreateGuardedDevice(endpoint, 0.30f, enabled: true);
-            device.SafePlugInUntilUtc = DateTime.MaxValue;
-            using (var engine = new AudioEngine(new ConfigStore(), EarGuardConfig.CreateDefault()))
+            device.SafePlugInUntil = long.MaxValue;
+            using (var engine = TestEnvironment.Engine(TestEnvironment.Store(), EarGuardConfig.CreateDefault()))
             {
                 AttachDevice(engine, device);
                 InvokeEngine(engine, "WatchdogTick", (object)null);
@@ -260,7 +626,7 @@ namespace EarGuard.Tests
                 Assert(Math.Abs(endpoint.Volume - 0.05f) < 0.0001f,
                     "External callback must hold the plug-in cap during grace");
 
-                device.SafePlugInUntilUtc = DateTime.MinValue;
+                device.SafePlugInUntil = 0;
                 endpoint.Volume = 0.20f;
                 int writes = endpoint.WriteCount;
                 InvokeEngine(engine, "WatchdogTick", (object)null);
@@ -278,7 +644,7 @@ namespace EarGuard.Tests
         {
             var endpoint = new FakeEndpointVolume(0.80f);
             var device = CreateGuardedDevice(endpoint, 0.30f, true);
-            using (var engine = new AudioEngine(new ConfigStore(), EarGuardConfig.CreateDefault()))
+            using (var engine = TestEnvironment.Engine(TestEnvironment.Store(), EarGuardConfig.CreateDefault()))
             using (var firstRead = new ManualResetEvent(false))
             using (var releaseRead = new ManualResetEvent(false))
             using (var secondStarted = new ManualResetEvent(false))
@@ -344,7 +710,7 @@ namespace EarGuard.Tests
             {
                 var endpoint = new FakeEndpointVolume(0.80f);
                 var device = CreateGuardedDevice(endpoint, 0.30f, true);
-                using (var engine = new AudioEngine(new ConfigStore(), EarGuardConfig.CreateDefault()))
+                using (var engine = TestEnvironment.Engine(TestEnvironment.Store(), EarGuardConfig.CreateDefault()))
                 {
                     AttachDevice(engine, device);
                     fail(endpoint);
@@ -354,7 +720,7 @@ namespace EarGuard.Tests
                         "Unknown hardware state must not be reported safe or invalidated");
                     Assert(engine.GuardedDevices.Count == 1 && device.VolumeControl == endpoint,
                         "Ordinary failures must leave the endpoint attached for watchdog retry");
-                    Assert(device.SafePlugInUntilUtc == DateTime.MinValue,
+                    Assert(device.SafePlugInUntil == 0,
                         "Ordinary failures must not restart plug-in grace");
                     Assert(endpoint.WriteCount == 0, "A failed attempt must not change hardware");
                     endpoint.ReadHr = endpoint.WriteHr = 0;
@@ -379,7 +745,7 @@ namespace EarGuard.Tests
             {
                 var endpoint = new FakeEndpointVolume(0.80f);
                 var device = CreateGuardedDevice(endpoint, 0.30f, true);
-                using (var engine = new AudioEngine(new ConfigStore(), EarGuardConfig.CreateDefault()))
+                using (var engine = TestEnvironment.Engine(TestEnvironment.Store(), EarGuardConfig.CreateDefault()))
                 {
                     var queue = EnableControlledQueue(engine);
                     AttachDevice(engine, device);
@@ -401,7 +767,7 @@ namespace EarGuard.Tests
         {
             var endpoint = new FakeEndpointVolume(0.20f);
             var device = CreateGuardedDevice(endpoint, 0.30f, true);
-            using (var engine = new AudioEngine(new ConfigStore(), EarGuardConfig.CreateDefault()))
+            using (var engine = TestEnvironment.Engine(TestEnvironment.Store(), EarGuardConfig.CreateDefault()))
             {
                 var queue = EnableControlledQueue(engine);
                 AttachDevice(engine, device);
@@ -421,7 +787,7 @@ namespace EarGuard.Tests
 
         private static void Test_HardwareNotifications_DoNotBlockQueuedWork()
         {
-            using (var engine = new AudioEngine(new ConfigStore(), EarGuardConfig.CreateDefault()))
+            using (var engine = TestEnvironment.Engine(TestEnvironment.Store(), EarGuardConfig.CreateDefault()))
             {
                 var queue = EnableControlledQueue(engine);
                 InvokeEngine(engine, "OnHardwareDevicesChanged");
@@ -451,7 +817,7 @@ namespace EarGuard.Tests
         {
             var endpoint = new FakeEndpointVolume(0.20f);
             var device = CreateGuardedDevice(endpoint, 0.30f, true);
-            using (var engine = new AudioEngine(new ConfigStore(), EarGuardConfig.CreateDefault()))
+            using (var engine = TestEnvironment.Engine(TestEnvironment.Store(), EarGuardConfig.CreateDefault()))
             {
                 int published = 0;
                 engine.DevicesChanged += (s, e) => Interlocked.Increment(ref published);
@@ -528,7 +894,7 @@ namespace EarGuard.Tests
         {
             var endpoint = new FakeEndpointVolume(0.80f);
             var device = CreateGuardedDevice(endpoint, 0.30f, true);
-            using (var engine = new AudioEngine(new ConfigStore(), EarGuardConfig.CreateDefault()))
+            using (var engine = TestEnvironment.Engine(TestEnvironment.Store(), EarGuardConfig.CreateDefault()))
             {
                 var queue = EnableControlledQueue(engine);
                 bool callbackReturned = false;
@@ -553,7 +919,7 @@ namespace EarGuard.Tests
 
         private static void Test_DefaultResolutionFailure_ClearsPreviousId()
         {
-            using (var engine = new AudioEngine(new ConfigStore(), EarGuardConfig.CreateDefault()))
+            using (var engine = TestEnvironment.Engine(TestEnvironment.Store(), EarGuardConfig.CreateDefault()))
             {
                 SetEngineField(engine, "_defaultDeviceId", "STALE-ENDPOINT");
                 InvokeEngine(engine, "RefreshDefaultDeviceId");
@@ -650,13 +1016,15 @@ namespace EarGuard.Tests
         /// In-memory stand-in for a hardware endpoint. It records every write so the tests can prove
         /// that EarGuard only ever issues a write when the endpoint got too loud.
         /// </summary>
-        private sealed class FakeEndpointVolume : IAudioEndpointVolume
+        internal sealed class FakeEndpointVolume : IAudioEndpointVolume
         {
             public float Volume;
             public int WriteCount;
             public float LastWritten;
             public float LastObservedBeforeWrite;
             public int RaisingWriteCount;
+            public int RegisterHr;
+            public int RegisterCalls;
             public int ReadHr;
             public int WriteHr;
             public Exception ReadException;
@@ -669,7 +1037,7 @@ namespace EarGuard.Tests
                 Volume = initialVolume;
             }
 
-            public int RegisterControlChangeNotify(IAudioEndpointVolumeCallback pNotify) { return 0; }
+            public int RegisterControlChangeNotify(IAudioEndpointVolumeCallback pNotify) { RegisterCalls++; return RegisterHr; }
             public int UnregisterControlChangeNotify(IAudioEndpointVolumeCallback pNotify) { return 0; }
             public int GetChannelCount(out uint pnChannelCount) { pnChannelCount = 2; return 0; }
             public int SetMasterVolumeLevel(float fLevelDB, ref Guid pguidEventContext) { return 0; }
@@ -776,7 +1144,7 @@ namespace EarGuard.Tests
             var failedEndpoint = new FakeEndpointVolume(0.80f) { ReadHr = CoreAudioConstants.RPC_E_DISCONNECTED };
             var invalidated = CreateGuardedDevice(failedEndpoint, 0.30f, true);
             invalidated.DeviceId = "INVALIDATED";
-            using (var engine = new AudioEngine(new ConfigStore(), EarGuardConfig.CreateDefault()))
+            using (var engine = TestEnvironment.Engine(TestEnvironment.Store(), EarGuardConfig.CreateDefault()))
             {
                 // Reverse traversal visits the invalidated endpoint first, then the survivor.
                 AttachDevice(engine, surviving);
@@ -796,9 +1164,9 @@ namespace EarGuard.Tests
 
         private static void Test_MMCSS_WorkerThreadInitializes()
         {
-            var configStore = new ConfigStore();
+            var configStore = TestEnvironment.Store();
             var config = EarGuardConfig.CreateDefault();
-            using (var engine = new AudioEngine(configStore, config))
+            using (var engine = TestEnvironment.Engine(configStore, config))
             {
                 engine.Start();
                 // Give the worker thread a moment to initialize MMCSS

@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -18,7 +19,8 @@ namespace EarGuard.Tray
         // that flag is to call Shell_NotifyIcon directly.
         private const int NIM_MODIFY = 0x00000001;
         private const int NIF_INFO = 0x00000010;
-        private const int NIIF_NONE = 0x00000000;
+        private const int NIIF_USER = 0x00000004;
+        private const int NIIF_LARGE_ICON = 0x00000020;
         private const int NIIF_NOSOUND = 0x00000010;
         private const int NIIF_RESPECT_QUIET_TIME = 0x00000080;
 
@@ -55,7 +57,9 @@ namespace EarGuard.Tray
         private ToolStripMenuItem _exitMenuItem;
 
         private Icon _trayIcon;
-        private DateTime _lastBalloonTime = DateTime.MinValue;
+        private Icon _balloonIcon;
+        private Image _menuLogo;
+        private readonly Stopwatch _balloonClock = new Stopwatch();
         private TaskbarListener _taskbarListener;
         private uint _taskbarCreatedMessage;
         public event EventHandler OpenRequested;
@@ -63,7 +67,8 @@ namespace EarGuard.Tray
 
         public TrayManager()
         {
-            InitializeIcon();
+            _trayIcon = LoadLogoIcon(SystemInformation.SmallIconSize);
+            _balloonIcon = LoadLogoIcon(SystemInformation.IconSize);
             InitializeContextMenu();
             InitializeNotifyIcon();
             InitializeTaskbarRecovery();
@@ -141,87 +146,71 @@ namespace EarGuard.Tray
             }
         }
 
-        private void InitializeIcon()
-        {
-            string pngPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "EarGuard-transparent.png");
-            if (!System.IO.File.Exists(pngPath))
-            {
-                pngPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "EarGuard.png");
-            }
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DestroyIcon(IntPtr icon);
 
-            if (System.IO.File.Exists(pngPath))
+        internal static Icon OwnedIcon(Bitmap bitmap)
+        {
+            IntPtr handle = bitmap.GetHicon();
+            try
             {
+                using (Icon borrowed = Icon.FromHandle(handle)) return (Icon)borrowed.Clone();
+            }
+            finally { DestroyIcon(handle); }
+        }
+
+        internal static Icon LoadLogoIcon(Size size)
+        {
+            foreach (string filename in new[] { "EarGuard-transparent.png", "EarGuard.png" })
+            {
+                string path = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, filename);
+                if (!System.IO.File.Exists(path)) continue;
                 try
                 {
-                    using (var stream = new System.IO.FileStream(pngPath, System.IO.FileMode.Open, System.IO.FileAccess.Read))
-                    using (var bmp = new Bitmap(Image.FromStream(stream), new Size(32, 32)))
-                    {
-                        IntPtr hIcon = bmp.GetHicon();
-                        _trayIcon = Icon.FromHandle(hIcon);
-                        return;
-                    }
+                    using (var source = Image.FromFile(path))
+                    using (var bitmap = new Bitmap(source, size)) return OwnedIcon(bitmap);
                 }
-                catch { }
+                catch (ArgumentException) { }
+                catch (System.IO.IOException) { }
+                catch (System.Runtime.InteropServices.ExternalException) { }
+                // GDI+ also uses this exception for invalid image data.
+                catch (OutOfMemoryException) { }
             }
-
             string icoPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "EarGuard.ico");
             if (System.IO.File.Exists(icoPath))
             {
-                try
-                {
-                    _trayIcon = new Icon(icoPath);
-                    return;
-                }
-                catch { }
+                try { return new Icon(icoPath, size); }
+                catch (ArgumentException) { }
+                catch (System.IO.IOException) { }
             }
-
-            // The installed copy (%LOCALAPPDATA%\EarGuard) ships the exe alone: no loose PNG or
-            // ICO sits beside it. The logo is still present - it is embedded in the executable
-            // itself via /win32icon at compile time - so extract that before giving up on branding.
-            // ExtractAssociatedIcon returns an owning Icon: it must stay alive for the lifetime of
-            // the tray icon, so it is intentionally NOT wrapped in a using block.
             try
             {
-                string exePath = System.Reflection.Assembly.GetExecutingAssembly().Location;
-                if (!string.IsNullOrEmpty(exePath))
+                using (var extracted = Icon.ExtractAssociatedIcon(Assembly.GetExecutingAssembly().Location))
                 {
-                    _trayIcon = Icon.ExtractAssociatedIcon(exePath);
-                    if (_trayIcon != null) return;
+                    if (extracted != null)
+                        using (var source = extracted.ToBitmap())
+                        using (var bitmap = new Bitmap(source, size)) return OwnedIcon(bitmap);
                 }
             }
-            catch { }
-
-            _trayIcon = CreateShieldIcon(Color.FromArgb(16, 163, 74), Color.White);
+            catch (ArgumentException) { }
+            catch (System.IO.IOException) { }
+            using (var shield = CreateShieldIcon(Color.FromArgb(16, 163, 74), Color.White))
+            using (var source = shield.ToBitmap())
+            using (var bitmap = new Bitmap(source, size)) return OwnedIcon(bitmap);
         }
 
         private void InitializeContextMenu()
         {
             _contextMenu = new ContextMenuStrip();
 
-            Image logoImg = null;
-            string pngPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "EarGuard-transparent.png");
-            if (!System.IO.File.Exists(pngPath))
-            {
-                pngPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "EarGuard.png");
-            }
-
-            if (System.IO.File.Exists(pngPath))
-            {
-                try
-                {
-                    using (var stream = new System.IO.FileStream(pngPath, System.IO.FileMode.Open, System.IO.FileAccess.Read))
-                    {
-                        logoImg = new Bitmap(Image.FromStream(stream), new Size(18, 18));
-                    }
-                }
-                catch { }
-            }
+            using (var logo = LoadLogoIcon(new Size(18, 18))) _menuLogo = logo.ToBitmap();
 
             // Single, clean, branded Open EarGuard item with the EarGuard logo
             _openMenuItem = new ToolStripMenuItem("Open EarGuard")
             {
                 Font = new Font(_contextMenu.Font.FontFamily, 9.5f, FontStyle.Bold),
-                Image = logoImg
+                Image = _menuLogo
             };
             _openMenuItem.Click += (s, e) => { if (OpenRequested != null) OpenRequested(this, EventArgs.Empty); };
 
@@ -271,8 +260,8 @@ namespace EarGuard.Tray
             if (_notifyIcon == null) return;
 
             // Rate limit to once every 3 seconds to prevent notification spam during a volume storm.
-            if ((DateTime.Now - _lastBalloonTime).TotalSeconds < 3.0) return;
-            _lastBalloonTime = DateTime.Now;
+            if (_balloonClock.IsRunning && _balloonClock.ElapsedMilliseconds < 3000) return;
+            _balloonClock.Restart();
 
             string title = "EarGuard lowered the volume";
             string message = string.Format(
@@ -318,9 +307,15 @@ namespace EarGuard.Tray
                 data.uFlags = NIF_INFO;
                 data.szInfo = Truncate(message, 255);
                 data.szInfoTitle = Truncate(title, 63);
-                data.dwInfoFlags = NIIF_NONE | NIIF_NOSOUND | NIIF_RESPECT_QUIET_TIME;
-
-                Shell_NotifyIcon(NIM_MODIFY, ref data);
+                data.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON | NIIF_NOSOUND | NIIF_RESPECT_QUIET_TIME;
+                data.hBalloonIcon = _balloonIcon.Handle;
+                if (!Shell_NotifyIcon(NIM_MODIFY, ref data))
+                {
+                    data.dwInfoFlags = NIIF_NOSOUND | NIIF_RESPECT_QUIET_TIME;
+                    data.hBalloonIcon = IntPtr.Zero;
+                    if (!Shell_NotifyIcon(NIM_MODIFY, ref data))
+                        Debug.WriteLine("Shell rejected the silent notification submission.");
+                }
             }
             catch
             {
@@ -373,8 +368,7 @@ namespace EarGuard.Tray
                     }
                 }
 
-                IntPtr hIcon = bmp.GetHicon();
-                return Icon.FromHandle(hIcon);
+                return OwnedIcon(bmp);
             }
         }
 
@@ -398,6 +392,9 @@ namespace EarGuard.Tray
                 _contextMenu.Dispose();
                 _contextMenu = null;
             }
+
+            if (_menuLogo != null) { _menuLogo.Dispose(); _menuLogo = null; }
+            if (_balloonIcon != null) { _balloonIcon.Dispose(); _balloonIcon = null; }
 
             if (_trayIcon != null)
             {

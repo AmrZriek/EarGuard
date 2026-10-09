@@ -5,6 +5,10 @@ using EarGuard.Config;
 using EarGuard.Tray;
 using EarGuard.UI;
 
+[assembly: System.Reflection.AssemblyVersion("1.1.3.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.1.3.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.1.3")]
+
 namespace EarGuard
 {
     public static class Program

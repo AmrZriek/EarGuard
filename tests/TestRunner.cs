@@ -13,9 +13,14 @@ namespace EarGuard.Tests
             try
             {
                 ConfigStoreTests.RunAll();
+                ReliabilityTests.RunAll();
+                TaskSchedulerStartupRegistrarTests.RunAll();
                 AudioEngineTests.RunAll();
                 TrayIconRecoveryTests.RunAll();
-                EndToEndIntegrationTest.Run();
+                IconOwnershipTests.RunAll();
+                MainWindowTests.RunAll();
+                if (Array.IndexOf(args, "--hardware") >= 0) EndToEndIntegrationTest.Run();
+                Console.WriteLine("Retained artifacts: " + TestEnvironment.Root);
                 Console.WriteLine();
                 Console.WriteLine("========================================");
                 Console.WriteLine("  ✓ ALL TEST SUITES PASSED SUCCESSFULLY ");

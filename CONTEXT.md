@@ -1,55 +1,39 @@
-# EarGuard — CONTEXT.md
+# EarGuard — Project Context
 
-## What it is
-EarGuard for Windows: hardware volume spike protector for IEM/headphone audiophiles. Runs in the system tray, hooks physical audio endpoints via WASAPI `IAudioEndpointVolumeCallback`, and brings any volume spike past a user ceiling back down. Its one volume-writing routine is lower-only: it can never raise volume. Protects against Windows Audio Service init-at-100% amnesia, USB-C dongle DAC plug-in blasts, and exclusive-mode players (Tidal/Qobuz/Foobar2000) that bypass the software mixer. Enforcement is reactive: it cannot block playback before a change or guarantee zero-latency clamping, but enforces limits via hardware callbacks and a 100ms watchdog.
+## Current state
 
-## Stack
-- C# / .NET Framework 4.8 (WPF, WinForms NotifyIcon tray), zero dependencies, no installer
-- Build: `csc @EarGuard.rsp` (~0.5s) or `build.ps1` (runs test suite then compiles)
-- Layout: `src/Audio/` (CoreAudio COM interop, engine, guarded device), `src/Config/` (settings.json in %APPDATA%\EarGuard, durable install to %LOCALAPPDATA%\EarGuard, Task Scheduler deterministic logon startup), `src/Tray/` (tray, single-instance mutex, recovery), `src/UI/` (MainWindow.cs), `tests/` (AudioEngine, ConfigStore, ApplicationInstaller, TrayIconRecovery, E2E)
-- Docs: `README.md`, `SPEC.md` (architecture + safety invariants), `LICENSE` (MIT)
+The working version is **v1.1.3**: assembly/file version `1.1.3.0`, informational version `1.1.3`. The last committed public version is **v1.1.2**. The v1.1.3 changes are uncommitted and have not been published.
 
-## State on 2026-09-20
-- Version: **v1.1.2 (released 2026-09-21)** — https://github.com/AmrZriek/EarGuard/releases/tag/v1.1.2, latest. Tags v1.0.0, v1.1.0, v1.1.1, v1.1.2. Commit `d0596a6` "1.1.2: Fix logon startup breaking when the file it launched from is moved or deleted" + `8c61256` docs tightening.
-- The first v1.1.2 attempt (release `0b0843d`) was fully erased at the user's request: GitHub release deleted, remote + local tag deleted, remote main force-rewound from `0b0843d` to `8a4bcc5`. The re-release reuses the version number v1.1.2 and pretends the attempt never existed. Full diff of the erased attempt preserved in `../EarGuard-v1.1.2-archive/` (backup patch + CONTEXT snapshot).
-- Ships as single portable `EarGuard.exe` (~83 KB), Windows 10/11, 0.0% idle CPU (event-driven + 100ms watchdog timer), MIT license. Current build SHA-256 `C3A7050104555BA5DE9EF588337CF64C3309F057CAFA8F8F9FB242CE5205572F`.
-- Autostart: Deterministic logon startup registered via Windows Task Scheduler (`EarGuardStartup`). The task launches the durable per-user copy at `%LOCALAPPDATA%\EarGuard\EarGuard.exe`, not the launch location, so startup survives the original file being moved or deleted. NOTE: this task is invisible in Task Manager's Startup apps tab by Windows design (it only lists Run-key and Startup-folder entries) — recurring user confusion, explain don't "fix".
-- Launch order, measured on this machine 2026-09-21: `EarGuardStartup` fired 8:47:51 PM (result `0x41301`), `explorer.exe` 8:47:52, GHelper 8:47:53 (`\GHelper_S-<SID>`), PowerToys 8:47:55 (`\PowerToys\Autorun for <user>` — same zero-delay logon-task class as EarGuard), while `HKCU\...\Run` apps were throttled late (Handy +44 s, GeminiDesk +6 min). Only automatically-started services beat it (NVIDIA containers 8:47:49-50, session 0) and those cannot host a tray icon. EarGuard is already in the earliest class a portable, non-elevated tray app can occupy; do not chase "first" further (a `BootTrigger` task needs Administrators to create, and a session-0 service has no shell).
-- Tray icon position is shell-owned, not app-controllable: Windows picks the slot, the user drags it or promotes it (*Settings → Personalization → Taskbar → Other system tray icons*). Per-icon shell state lives in `HKCU\Control Panel\NotifyIconSettings\<hash>`, keyed by **executable path + initial tooltip** — change either and the shell sees a new icon in a new, unarranged slot. Three EarGuard records exist on this machine (pre-install `D:\Projects\Software\EarGuard\EarGuard.exe`, a `powershell.exe` record carrying the older em-dash tooltip, and the current `%LOCALAPPDATA%` one). Never change the durable install path or the initial tooltip string, and never reorder the flyout from code (SPEC §4.1 prohibition).
-- Tray icon: the installed copy ships the exe alone (no loose PNG/ICO beside it). Icon chain: loose `EarGuard-transparent.png`/`EarGuard.png` → loose `EarGuard.ico` → **embedded Win32 icon via `Icon.ExtractAssociatedIcon`** → generated shield. The extracted Icon owns its handle and must NOT be disposed (an earlier `using`-wrapped version crashed at startup with `ObjectDisposedException` in `NotifyIcon.set_Icon`).
-- Repo: https://github.com/AmrZriek/EarGuard — Releases page distributes `EarGuard.exe`; Ko-fi: https://ko-fi.com/amrzriek
-- Pricing: free + open source (Ko-fi donations).
+This is a reliability patch. It improves audio-device discovery and callback recovery, settings persistence and backup recovery, startup registration, live-volume readings, and logo handling.
 
-## v1.1.1 Release Highlights
-- **Sleep & Reconnect Grace Window:** Keeps `SafePlugInVol` (5% default) limit active for 3 seconds (`SafePlugInGraceMs`) after device arrival or system resume from sleep/hibernate. Handles Windows Audio Service late restores where volume is raised hundreds of milliseconds after device detection.
-- **Publish On Change Gating:** Writes `settings.json` and triggers UI rebuilds only when endpoint topology or default device actually changes, reducing ~30 redundant disk writes and UI sweeps to a handful of scans per event.
-- **Quiet Devices Unmodified & Lower-Only:** Never touches endpoints already below limit. Removed the volume-raising test button.
-- **Silent Balloon Notifications:** Clamp alerts use `NIIF_NOSOUND` so notifications never produce loud Windows chimes.
-- **Dynamic Device Tracking:** Window follows Windows default playback endpoint until user manually selects an output; respects explicit manual choices.
-- **Build & Layout Polish:** Pipe separator in window and tray titles; `build.ps1` produces byte-identical binaries with Roslyn; documented `csc @EarGuard.rsp` paths fixed.
+## Application
 
-## v1.1.2 Highlights (re-release, unreleased)
-- **Durable Install Target:** "Start with Windows" registers `%LOCALAPPDATA%\EarGuard\EarGuard.exe`, not the launch location. `ApplicationInstaller` copies the running build there first; no elevation required, `%APPDATA%\EarGuard\settings.json` untouched.
-- **Startup Self-Healing:** `MigrateStartupRegistrationIfNeeded()` runs on every launch (Program.cs). `IStartupRegistrar.IsEnabledFor(path)` distinguishes "registered" from "registered against this path", so a stale task path is rewritten and a healthy one left alone.
-- **Build Lock Fix:** `build.ps1` stops a running instance before compiling (prevents CS2012 and a truncated exe), then refreshes the installed copy when startup is registered.
-- **Screenshot:** replaced with a capture of the current UI (42,841 bytes).
-- **Tray Logo on Installed Copy (new):** the exe-only installed copy showed a generic green shield instead of the logo, so users couldn't recognize the app in the overflow flyout. Fallback chain now reaches the icon embedded in the exe via `/win32icon`.
+EarGuard is a portable Windows 10/11 tray app for limiting unexpected output-volume changes. It uses C# and .NET Framework 4.8, WPF for the window, WinForms for the tray icon, and Windows CoreAudio for endpoint control. There are no external dependencies.
 
-## ASSETS (verified paths, repo root)
-- `screenshot.png` (42.8 KB) — main UI screenshot, used in README; primary website hero/demo asset
-- `EarGuard.png` (15.6 KB) — logo, used in README header; website icon/product tile
-- `EarGuard-transparent.png` (15.6 KB) — transparent logo variant; website/dark-background use
-- `EarGuard.ico` (15.6 KB) — embedded app icon; favicon source candidate
-- `EarGuard.exe` (83 KB / 84,992 bytes, SHA-256 `D61907E9…`) — current portable binary (canonical distribution via GitHub Releases)
-- `LICENSE` (1 KB) — official MIT license file
-- `archive/` — legacy assets and design prototypes
+Protection is reactive. Callbacks and a 100 ms watchdog lower volume above the chosen ceiling; they cannot prevent every brief spike or guarantee hearing safety. Exclusive-mode behavior depends on hardware and driver support. Windows provides no atomic read-and-set against other volume writers.
 
-## Session log
-- 2026-09-13 (Hermes recon): First inventory. Wrote CONTEXT.md + `docs/website-brief.md`.
-- 2026-09-18 (Amr / Hermes): v1.1.1 release and license addition. Sleep/wake volume limits, quiet reconnects, build script and rsp fixes, MIT license file added.
-- 2026-09-19 (Hermes maintenance): Validated full test suite (ConfigStore, AudioEngine, TrayIconRecovery, E2E all pass). Updated CONTEXT.md with v1.1.1 specs, Task Scheduler details, and asset metrics.
-- 2026-09-20 (omp): Diagnosed "EarGuard missing from tray after Windows update". Root cause was not the update: the registered task still fired at logon and failed with `0x80070002` because the executable it named (`D:\Projects\Software\EarGuard\EarGuard.exe`) had been deleted from the working tree. Added `ApplicationInstaller` so startup registers the durable `%LOCALAPPDATA%\EarGuard\EarGuard.exe` copy instead of the launch location, `IStartupRegistrar.IsEnabledFor` so a task pointing at a stale path is detected and rewritten, and self-healing on every launch. `build.ps1` now stops a running instance before compiling (the compiler cannot replace a locked exe) and refreshes the installed copy when startup is registered. Corrected stale `HKCU\...\Run` startup documentation in SPEC.md.
-- 2026-09-20 (omp, release): Shipped v1.1.2. Release notes written into README; stale binary sizes corrected everywhere (Roslyn 84,992 B, in-box 87,552 B — source grew with the new installer code). Screenshot updated to the current UI. Live task on this machine verified migrated to the durable path and confirmed running from it with the repo exe deleted.
-- 2026-09-21 (omp, release v1.1.2): User soak-tested the icon-fixed build, confirmed good, requested release as v1.1.2 (attempt treated as never existing). Committed feature set as `d0596a6`, tagged, pushed, published GitHub release with full notes + exe asset. Per user feedback, README release notes tightened to frontpage-friendly summaries (full bullets live on the release page; v1.1.1 bullets moved there too) — committed as `8c61256`. `gh` is not on PATH and can't be exec'd from bash directly on this box; must invoke via `powershell -File script.ps1` with the full WinGet path. LinkedIn post drafted with sepia skill (health-first, no code talk).
-- 2026-09-20 (omp, rollback + fix): User asked to wipe v1.1.2 as if it never existed, fix the icon, soak-test 1-2 days, then re-release as v1.1.2 (same number, attempt treated as never having happened). Diagnosed user's "no tray icon" report live: task fired, exe ran from `%LOCALAPPDATA%`, icon alive but banished to the Win11 overflow flyout (found via UIAutomation scan after invoking the chevron; user confirmed they saw it but didn't recognize it without its logo). Root cause of logo-less icon: installed copy has no loose PNG/ICO, and the fallback chain never read the exe's embedded Win32 icon. Rolled back: `gh release delete v1.1.2`, deleted remote+local tag, `git reset --soft HEAD~1`, remote main force-rewound `0b0843d` → `8a4bcc5`; attempt diff archived to `../EarGuard-v1.1.2-archive/`. Fixed `TrayManager.InitializeIcon` fallback (extract embedded icon; first attempt wrapped it in `using` → `ObjectDisposedException` crash at startup, caught via event log, fixed by keeping the owning Icon alive). Rebuilt (SHA-256 `C3A70501…`), build.ps1 refreshed the installed copy, relaunched, icon verified present in overflow flyout, process stable.
-- 2026-09-21 (omp): User reported NVIDIA → PowerToys → EarGuard tray order and asked to be "first". Measured this machine's logon session (process `CreationDate` + task info + parent PIDs): EarGuard's zero-delay logon task fired 1 s *before* `explorer.exe` and 4 s before PowerToys, which uses the same logon-task mechanism; `HKCU\...\Run` apps slip to +44 s / +6 min. The observation is the Windows 11 overflow-flyout arrangement, which no application can control (Microsoft: "the system chooses where they go"; users drag to reorder; EarGuard's shell identity changed when v1.1.2 moved the exe to `%LOCALAPPDATA%`, which is why its arranged slot was lost). Recorded in SPEC §4.1/§4.2 only (launch-order boundary, task-invisibility rationale, no-ordering-control prohibition) plus this file; the user vetoed a startup/tray-order section in the public README, so that section was written, verified, and then reverted — README stays feature/setup-only. Docs only — no code changed, no tray-order claim made in release notes. Considered and rejected: boot-trigger/service pre-logon (admin + no shell + service/UI split), private-message tray hacking, and reordering `Main()` startup work (Task Scheduler COM costs 49 ms — below noise). CONTEXT.md session log is now over 50 lines; archive the pre-v1.1.2 entries on request.
+A three-second grace period applies the Safe Plug-in Limit (5% by default) after device arrival or resume. Protection is per device. The window follows the default output until the user chooses a device for the session.
+
+## Code and documentation
+
+- `src/Audio/`: CoreAudio interop, discovery, device protection, and event publication.
+- `src/Config/`: settings persistence, per-user installation, and Task Scheduler startup registration.
+- `src/Tray/`: tray icon, notifications, single-instance handling, and shell recovery.
+- `src/UI/`: the main window and its settings controls.
+- `tests/`: regression tests; real audio integration is opt-in.
+- `README.md`: public product description, setup, and user-facing release notes. Keep implementation and review details out of it.
+- `SPEC.md`: architecture, safety constraints, and build/test procedures.
+
+## Startup and tray behavior
+
+Settings live at `%APPDATA%\EarGuard\settings.json`. Enabling Start with Windows installs a durable executable at `%LOCALAPPDATA%\EarGuard\EarGuard.exe` and registers the `EarGuardStartup` logon task. Moving the original download does not break this registration.
+
+Task Scheduler startup does not appear in Task Manager's Startup apps list. Windows controls tray-icon placement. Keep the durable executable path and initial tooltip stable because they affect the shell's stored icon identity.
+
+The installed copy contains only the executable. Logo loading must support the embedded icon, and owned icon handles must remain alive while the tray uses them.
+
+## Project links
+
+Repository: https://github.com/AmrZriek/EarGuard
+
+License: MIT. Optional donations: https://ko-fi.com/amrzriek

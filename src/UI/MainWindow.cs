@@ -27,6 +27,8 @@ namespace EarGuard.UI
         private TextBlock _selectedDeviceTitle;
         private TextBlock _selectedDeviceDesc;
         private CheckBox _protectDeviceCheck;
+        private TextBlock _settingsStatus;
+        private bool _startupUpdateFailed;
         private Border _guardedStatusPill;
         private TextBlock _guardedStatusText;
         private TextBlock _ceilingBadge;
@@ -75,22 +77,30 @@ namespace EarGuard.UI
         {
             Title = "EarGuard | Volume Spike Protector";
             Width = 500;
-            Height = 540;
+            Height = 520;
             MinWidth = 480;
-            MinHeight = 520;
+            MinHeight = 480;
+            SizeToContent = SizeToContent.Height;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = new SolidColorBrush(Color.FromRgb(248, 250, 252)); // #F8FAFC
             FontFamily = new FontFamily("Segoe UI");
 
-            try
+            Icon = CreateLogoSource();
+
+            ContentRendered += (s, e) =>
             {
-                string iconPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "EarGuard.ico");
-                if (System.IO.File.Exists(iconPath))
-                {
-                    Icon = new System.Windows.Media.Imaging.BitmapImage(new Uri(iconPath));
-                }
+                SizeToContent = SizeToContent.Manual;
+            };
+        }
+        private static ImageSource CreateLogoSource()
+        {
+            using (var icon = TrayManager.LoadLogoIcon(new System.Drawing.Size(40, 40)))
+            {
+                var source = System.Windows.Interop.Imaging.CreateBitmapSourceFromHIcon(icon.Handle,
+                    Int32Rect.Empty, System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
+                source.Freeze();
+                return source;
             }
-            catch { }
         }
 
         private void BuildUi()
@@ -147,6 +157,7 @@ namespace EarGuard.UI
                 catch { }
             }
 
+            if (logoImage.Source == null) logoImage.Source = Icon;
             Grid.SetColumn(logoImage, 0);
             headerGrid.Children.Add(logoImage);
 
@@ -492,7 +503,7 @@ namespace EarGuard.UI
             bool isStartup = _configStore.IsStartupEnabled();
             if (_engine.Config.LaunchOnStartup != isStartup)
             {
-                _engine.Config.LaunchOnStartup = isStartup;
+                _configStore.Update(_engine.Config, () => _engine.Config.LaunchOnStartup = isStartup);
                 _configStore.Save(_engine.Config);
             }
 
@@ -515,6 +526,13 @@ namespace EarGuard.UI
                 IsChecked = _engine.Config.ShowNotificationOnBlock
             };
             settingsStack.Children.Add(_notifyCheck);
+            _settingsStatus = new TextBlock
+            {
+                Text = _configStore.SettingsSaved ? string.Empty : "Settings not saved. Protection remains active.",
+                FontSize = 11, TextWrapping = TextWrapping.Wrap,
+                Foreground = new SolidColorBrush(Color.FromRgb(146, 64, 14))
+            };
+            settingsStack.Children.Add(_settingsStatus);
 
             Grid.SetColumn(settingsStack, 0);
             footerGrid.Children.Add(settingsStack);
@@ -577,27 +595,27 @@ namespace EarGuard.UI
             _protectDeviceCheck.Checked += (s, e) =>
             {
                 if (_isUpdatingUiFromCode || _currentSelectedDevice == null) return;
-                _currentSelectedDevice.Config.Enabled = true;
-                _configStore.Save(_engine.Config);
+                _configStore.Update(_engine.Config, () => _currentSelectedDevice.Config.Enabled = true);
                 UpdateDeviceProtectionUiState();
 
                 // If the endpoint is louder than the ceiling, bring it down. This deliberately goes
                 // through the engine so that every hardware volume write lives in one audited place.
-                _engine.ApplyVolumeCeiling(_currentSelectedDevice, _currentSelectedDevice.Config.MaxLimit);
+                ClampSelectedDevice();
+                _configStore.Save(_engine.Config);
             };
 
             _protectDeviceCheck.Unchecked += (s, e) =>
             {
                 if (_isUpdatingUiFromCode || _currentSelectedDevice == null) return;
                 // Disabling does not request a volume change.
-                _currentSelectedDevice.Config.Enabled = false;
+                _configStore.Update(_engine.Config, () => _currentSelectedDevice.Config.Enabled = false);
                 _configStore.Save(_engine.Config);
                 UpdateDeviceProtectionUiState();
             };
 
             _refreshBtn.Click += (s, e) =>
             {
-                _engine.ScanDevices();
+                _engine.RequestScan();
                 RefreshDeviceDropdown();
             };
 
@@ -608,17 +626,20 @@ namespace EarGuard.UI
                 int ceiling = (int)Math.Round(_ceilingSlider.Value);
                 _ceilingBadge.Text = ceiling + "%";
 
-                _currentSelectedDevice.Config.MaxLimit = AudioEngine.PercentToScalar(ceiling);
+                _configStore.Update(_engine.Config, () => _currentSelectedDevice.Config.MaxLimit = AudioEngine.PercentToScalar(ceiling));
 
                 // Adjust safe plug-in slider max
-                _safeVolSlider.Maximum = ceiling;
-                if (_safeVolSlider.Value > ceiling)
+                _isUpdatingUiFromCode = true;
+                try
                 {
-                    _safeVolSlider.Value = ceiling;
+                    _safeVolSlider.Maximum = ceiling;
+                    _safeVolSlider.Value = AudioEngine.ScalarToPercent(_currentSelectedDevice.Config.SafePlugInVol);
+                    _safeVolBadge.Text = ((int)_safeVolSlider.Value) + "%";
                 }
+                finally { _isUpdatingUiFromCode = false; }
 
                 // If the endpoint is louder than the new ceiling, bring it down through the engine.
-                _engine.ApplyVolumeCeiling(_currentSelectedDevice, _currentSelectedDevice.Config.MaxLimit);
+                ClampSelectedDevice();
 
                 _configStore.Save(_engine.Config);
             };
@@ -630,35 +651,26 @@ namespace EarGuard.UI
                 int safeVol = (int)Math.Round(_safeVolSlider.Value);
                 _safeVolBadge.Text = safeVol + "%";
 
-                _currentSelectedDevice.Config.SafePlugInVol = AudioEngine.PercentToScalar(safeVol);
+                _configStore.Update(_engine.Config, () => _currentSelectedDevice.Config.SafePlugInVol = AudioEngine.PercentToScalar(safeVol));
                 _configStore.Save(_engine.Config);
             };
 
-            _startupCheck.Checked += (s, e) =>
-            {
-                _engine.Config.LaunchOnStartup = true;
-                _configStore.SetStartupEnabled(true);
-                _configStore.Save(_engine.Config);
-            };
-
-            _startupCheck.Unchecked += (s, e) =>
-            {
-                _engine.Config.LaunchOnStartup = false;
-                _configStore.SetStartupEnabled(false);
-                _configStore.Save(_engine.Config);
-            };
+            _startupCheck.Checked += (s, e) => SetStartup(true);
+            _startupCheck.Unchecked += (s, e) => SetStartup(false);
 
             _notifyCheck.Checked += (s, e) =>
             {
-                _engine.Config.ShowNotificationOnBlock = true;
+                _configStore.Update(_engine.Config, () => _engine.Config.ShowNotificationOnBlock = true);
                 _configStore.Save(_engine.Config);
             };
 
             _notifyCheck.Unchecked += (s, e) =>
             {
-                _engine.Config.ShowNotificationOnBlock = false;
+                _configStore.Update(_engine.Config, () => _engine.Config.ShowNotificationOnBlock = false);
                 _configStore.Save(_engine.Config);
             };
+
+            _configStore.SaveStatusChanged += (s, e) => Dispatcher.BeginInvoke(new Action(UpdateSettingsStatus));
 
             _minimizeBtn.Click += (s, e) => Hide();
 
@@ -685,7 +697,7 @@ namespace EarGuard.UI
                     if (_currentSelectedDevice != null && _currentSelectedDevice.Config.Enabled &&
                         string.Equals(_currentSelectedDevice.DeviceId, args.Device.DeviceId, StringComparison.OrdinalIgnoreCase))
                     {
-                        UpdateLiveVolume(args.ClampedVolume);
+                        UpdateLiveVolume(_currentSelectedDevice.CurrentVolume);
                         int oldPct = AudioEngine.ScalarToPercent(args.OldVolume);
                         int clampedPct = AudioEngine.ScalarToPercent(args.ClampedVolume);
                         _protectionStatusText.Text = string.Format("Last lowered: {0}% → {1}%.", oldPct, clampedPct);
@@ -713,10 +725,48 @@ namespace EarGuard.UI
             };
         }
 
+        private void SetStartup(bool enable)
+        {
+            if (_isUpdatingUiFromCode) return;
+            bool succeeded = _configStore.SetStartupEnabled(enable);
+            _startupUpdateFailed = !succeeded;
+            bool actual = _configStore.IsStartupEnabled();
+            _isUpdatingUiFromCode = true;
+            try { _startupCheck.IsChecked = actual; }
+            finally { _isUpdatingUiFromCode = false; }
+            _configStore.Update(_engine.Config, () => _engine.Config.LaunchOnStartup = actual);
+            _configStore.Save(_engine.Config);
+            _startupCheck.ToolTip = succeeded ? null : "Startup could not be fully updated. The checkbox shows the current registration.";
+            UpdateSettingsStatus();
+        }
+
+        private void UpdateSettingsStatus()
+        {
+            _settingsStatus.Text = (!_configStore.SettingsSaved ? "Settings not saved. Protection remains active. " : string.Empty)
+                + (_startupUpdateFailed ? "Startup could not be fully updated." : string.Empty);
+        }
+
+        private void ClampSelectedDevice()
+        {
+            var device = _currentSelectedDevice;
+            var result = _engine.ApplyVolumeCeiling(device, device.Config.MaxLimit);
+            if (result.Outcome == VolumeAdjustmentOutcome.Lowered || result.Outcome == VolumeAdjustmentOutcome.AlreadySafe)
+                UpdateLiveVolume(result.NewVolume);
+            UpdateGuardedCount();
+        }
+
+        private void UpdateGuardedCount()
+        {
+            int count = 0;
+            foreach (var device in _engine.GuardedDevices)
+                if (device.Config != null && device.Config.Enabled) count++;
+            _trayManager.UpdateStatus(count);
+        }
+
         private void RefreshDeviceDropdown()
         {
             var devices = _engine.GuardedDevices;
-            _trayManager.UpdateStatus(devices.Count);
+            UpdateGuardedCount();
 
             string previouslySelectedId = _currentSelectedDevice != null ? _currentSelectedDevice.DeviceId : null;
 
@@ -740,6 +790,10 @@ namespace EarGuard.UI
 
             if (devices.Count == 0)
             {
+                _currentSelectedDevice = null;
+                UpdateLiveVolume(0);
+                _guardedStatusText.Text = "No device";
+                _protectionStatusText.Text = "Connect an audio device to enable protection.";
                 var emptyItem = new ComboBoxItem
                 {
                     Content = "No active audio devices found",
@@ -833,6 +887,7 @@ namespace EarGuard.UI
         }
         private void UpdateDeviceProtectionUiState()
         {
+            UpdateGuardedCount();
             if (_currentSelectedDevice == null || _currentSelectedDevice.Config == null) return;
 
             bool isGuarded = _currentSelectedDevice.Config.Enabled;

@@ -1,5 +1,7 @@
 # EarGuard — Architecture Specification & Engineering Reference
 
+Current source version: **v1.1.3**, prepared for release. Assembly/file version: `1.1.3.0`; informational version: `1.1.3`. Last committed public version: **v1.1.2**.
+
 ## 1. Executive Summary
 EarGuard is a lightweight, zero-dependency, portable Windows application (.NET Framework 4.8 / WPF) that detects and lowers endpoint volume above configured limits. It targets unexpected volume changes during device connection, Windows Audio Service initialization, and playback. Enforcement is reactive: it cannot block playback before a change, guarantee no brief spikes, or guarantee hearing safety. Device and driver support determine whether endpoint-volume changes affect exclusive-mode playback.
 
@@ -54,7 +56,7 @@ Windows CoreAudio assigns generic form-factor descriptors to `PKEY_Interface_Fri
 5. **Lower-Only Requests:** One routine writes endpoint volume. It reads the current scalar and requests a lower value only when that observation exceeds the active limit; it does not deliberately raise quiet volume to a target. EarGuard serializes its own read/compare/write transactions. These are not atomic against Windows or other applications: an external writer can lower volume between EarGuard's read and write, and EarGuard's pending request can then exceed that newer value. This path cannot provide an absolute never-raises guarantee.
 6. **Feedback Loop Prevention:** EarGuard maintains a unique `ContextGuid` on startup. Volume adjustments initiated by EarGuard pass `ref ContextGuid`, which the callback ignores to prevent recursion loops.
 7. **Watchdog Redundancy:** A background timer inspects endpoint scalars every `WatchdogIntervalMs` (100 ms) as defense-in-depth against hardware sleep/wake glitches.
-8. **Discovery Retries:** Windows finishes re-indexing a newly reported endpoint slightly after it raises the notification, so discovery retries run at `DiscoveryRetryIntervalMs` (500 ms) until `SafePlugInGraceMs` expires. Retries stop early once a scan observes a structural change, so one notification costs a handful of scans rather than one per tick.
+8. **Discovery Retries:** Windows finishes re-indexing a newly reported endpoint slightly after it raises the notification, so discovery retries run at `DiscoveryRetryIntervalMs` (500 ms) until `SafePlugInGraceMs` expires. The complete monotonic arrival window is retained for staggered arrivals. Missing enumerators, incomplete enumeration and failed callback registration retry at the same bounded rate, with coalesced worker requests. Incomplete enumeration never proves removal; the watchdog remains active while callbacks are retried.
 9. **Publish On Change:** A scan re-asserts every cap, but writes `settings.json` and raises `DevicesChanged` only when the guarded device set or the default endpoint actually changed. Without that gate each scan rewrites the settings file and rebuilds the UI device list, which turned a single device change into dozens of file writes and UI rebuilds.
 
 ---
@@ -81,12 +83,12 @@ Windows CoreAudio assigns generic form-factor descriptors to `PKEY_Interface_Fri
     ]
   }
   ```
-* **Validation:** Clamps `MaxLimit` between `0.01` and `1.00`, and `SafePlugInVol` between `0.00` and `MaxLimit`. The ceiling is the user's own choice: any value from 1% to 100% is accepted and honoured exactly. Non-finite values are replaced with safe defaults. Corrupted JSON files automatically recover to safe defaults.
+* **Validation:** Clamps `MaxLimit` between `0.01` and `1.00`, and `SafePlugInVol` between `0.00` and `MaxLimit`. The ceiling is the user's own choice: any value from 1% to 100% is accepted and honoured exactly. Non-finite values are replaced with safe defaults. Corrupted JSON recovers from a deserializable backup before safe defaults. Same-directory staged writes atomically replace the primary; corrupt input is retained separately and never rotates over the last usable backup. Expected filesystem failures return an explicit failure while active settings remain in memory. UI mutations and snapshot serialization share the engine lock; disk commits are serialized separately, in snapshot order, outside that lock.
 * **Silent Windows Startup:**
   * Registered as a per-user, least-privilege Task Scheduler task named `EarGuardStartup` (`LogonTrigger`, zero delay, interactive token, `RunLevel = LUA`), created through the Task Scheduler COM API. `schtasks.exe /create` returns "Access is denied" for a non-elevated user even for a per-user ONLOGON task, so the COM API is required.
   * The task launches the executable with `--tray`. Only `EarGuardStartup` is ever created, updated, queried, or removed; unrelated tasks are untouched.
   * **Durable install target:** the registration points at `%LOCALAPPDATA%\EarGuard\EarGuard.exe`, not at the location the user launched from. `ApplicationInstaller` copies the running build there before the task is registered. A user who enables startup from a Downloads folder, a USB stick, or a build tree therefore keeps a working sign-in launch after that file is deleted, moved, or cleaned up. `%LOCALAPPDATA%` needs no elevation and is separate from `%APPDATA%\EarGuard\settings.json`, so installing does not move the user's configuration.
-  * **Self-healing:** `MigrateStartupRegistrationIfNeeded()` reconciles the stored preference, the registry and the task on every launch. `IStartupRegistrar.IsEnabledFor(path)` distinguishes "registered" from "registered against this path", so a task left pointing at a stale location is rewritten rather than trusted. A task already bound to the durable path is left untouched.
+  * **Self-healing:** `MigrateStartupRegistrationIfNeeded()` reconciles the stored preference, the registry and the task on every launch. `IStartupRegistrar.IsEnabledFor(path)` distinguishes "registered" from "registered against this path", so a task left pointing at a stale location is rewritten rather than trusted. A healthy task is left untouched. Health reads `RegisteredTask.Definition.Actions` and checks enabled state, executable, `--tray`, working directory, current-user logon trigger, privilege and required settings. `ExecutionTimeLimit = PT0S` prevents the default 72-hour termination; existing limited tasks are repaired.
   * **Legacy migration:** a pre-existing `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\EarGuard` value is removed only after the task is created successfully; if task creation fails the Run value is deliberately retained so the user is never left without auto-start.
   * `ShouldStartSilent(string[] args)`: Recognizes `--tray`, `-tray`, `/tray`, `-t`, `--minimized`, `-minimized`, `/minimized`, `-m`, `--silent`, `-silent`, `/silent`, `-s`, `--startup`, `-startup`, `/startup`, `--autostart`, `-autostart`, and `/autostart`.
   * **Launch-order guarantee and its boundary:** a per-user logon task with zero delay is the earliest class available to a portable, non-elevated tray application. Measured on a real sign-in: task fired 8:47:51 PM, `explorer.exe` 8:47:52, logon-task peers 8:47:53-55 (`\PowerToys\Autorun for <user>`, `\GHelper_S-<SID>`), while `HKCU\...\Run` apps slipped to +1 min and +6 min because the shell throttles them. Only automatically-started services and drivers (session 0) start earlier; they cannot host a notification-area icon, and their head start is irrelevant to protection because no user audio session exists yet. Earlier classes are unreachable without abandoning the portable / no-installer / no-elevation invariants: a `BootTrigger` task may only be created by a member of the Administrators group, and a session-0 service has no shell (no window, no tray icon) and cannot read per-user `HKCU` state without a service/UI split plus elevation at install time.
@@ -104,7 +106,7 @@ Windows CoreAudio assigns generic form-factor descriptors to `PKEY_Interface_Fri
   * `Exit EarGuard`
 
 ### 4.3 Module: `ui-frontend`
-* **Layout:** Compact resizable window (default `500 × 540`, minimum `480 × 520`, center screen). The protection card scrolls vertically when its wrapped content exceeds the available height; header, device selector, and footer stay visible.
+* **Layout:** Compact resizable window (default `500 × 520`, dynamically sized to content height on startup via `SizeToContent.Height`, minimum `480 × 480`, center screen). The protection card scrolls vertically when its wrapped content exceeds the available height; header, device selector, and footer stay visible.
 * **Startup Behavior:**
   * If launched with a tray/startup argument, stays hidden in the system tray with zero window popups or banners.
   * If launched directly (e.g. desktop shortcut), shows the main window immediately.
@@ -115,9 +117,10 @@ Windows CoreAudio assigns generic form-factor descriptors to `PKEY_Interface_Fri
   * Checkbox: `[✓] Protect` toggle with dynamic `[ 🛡️ Guarded ]` / `[ ⚪ Unprotected ]` status badge.
   * Ceiling Slider: 1% to 100% with real-time numeric readout.
   * Safe Plug-in Slider: 0% to Ceiling with real-time numeric readout.
-  * Live Volume Gauge: Real-time progress bar reflecting hardware endpoint volume.
+  * Live Volume Gauge: Real-time progress bar reflecting hardware endpoint volume. Changed safe levels observed by watchdog or discovery polling also publish `VolumeChanged`, outside the engine lock, so callback-registration failures do not leave the gauge stale. Unchanged polling does not publish redundant volume events.
   * Protection status follows the enabled state. Disabling clears the last-lowering message; queued clamp events do not replace the disabled status. Clamp messages describe historical lowering, not prevented audio.
   * There is no "test" control. Any feature that writes a louder value to the hardware is prohibited, so protection is verified by using the machine rather than by deliberately provoking a spike.
+* **Persistence status:** The footer quietly reports unsaved settings and failed startup operations. The startup checkbox reconciles with actual registration after partial failures. Guarded counts include only enabled endpoints; disconnecting the last endpoint clears selection and live state. Successful UI-triggered clamps refresh the live gauge immediately.
 * **Footer:** "Start with Windows", "Notify when volume is lowered", and "Minimize to Tray". Optional tray notifications report the observed old volume and requested lower volume after a successful write, with the system notification sound suppressed.
 
 ---
@@ -143,5 +146,17 @@ Under Roslyn from Visual Studio Build Tools the script passes `/deterministic+`,
 **Compiler compatibility:** `src/Audio/AudioEngine.cs` holds `VolumeAdjustmentResult` with explicit readonly fields and read-only properties rather than auto-properties with private setters. The C# 5 compiler shipped with .NET Framework cannot assign an auto-property backing field from a struct constructor (`CS0843`), and the response-file path is documented as working with that compiler.
 
 * **Target:** .NET Framework 4.8
-* **Output:** `EarGuard.exe` (Single standalone portable executable, 84,992 bytes under Roslyn; 87,552 bytes under the in-box .NET Framework compiler)
+* **Output:** `EarGuard.exe` (single standalone portable executable). The build prints its exact size, SHA-256, and isolated output path; it does not replace the repository-root copy.
 * **Dependencies:** Zero external NuGet packages or third-party DLLs. Pure native Windows API.
+
+### Verification and build isolation
+
+`build.ps1` defaults to isolated tests and compilation under `archive/builds/<run>/`, retaining binaries and scratch artifacts. `-BuildOnly` explicitly enforces this mode; `-Compiler Framework` and `-Compiler Roslyn` exercise both C# 5 compiler paths. Neither mode stops processes or updates the installed copy. `-HardwareTest` separately opts into real audio integration with isolated settings and fake startup services.
+
+`-Deploy` is explicit: compile and verify first, stage a same-directory copy, capture matching installed-process identities and arguments once, stop only those processes, atomically replace with a retained backup, and restore the stopped instances in `finally`. Unchanged binaries do not trigger replacement or process stops. Live deployment needs separate authorization.
+
+Grace, discovery and balloon throttles use `Stopwatch`. Only the owned worker receives MMCSS promotion, which it reverts on exit. Shutdown stops acceptance under the engine lock, joins outside it, and releases the queue after consumption ends. Public engine/property events are deferred until the publishing thread has left the engine lock.
+
+Balloon branding uses an owned system-large icon with `NIIF_USER | NIIF_LARGE_ICON`; `NIIF_NOSOUND` and `NIIF_RESPECT_QUIET_TIME` remain set on both branded submission and its single silent fallback. Submission success does not prove delivery. Generated HICONs are cloned into owning icons and the original handles destroyed; intermediate images and extracted icons are disposed after use. Window/header/menu fallbacks share logo resolution.
+
+API references: [notification icon contract](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataw), [registered task properties](https://learn.microsoft.com/en-us/windows/win32/taskschd/registeredtask), [execution time limit](https://learn.microsoft.com/en-us/windows/win32/taskschd/tasksettings-executiontimelimit).

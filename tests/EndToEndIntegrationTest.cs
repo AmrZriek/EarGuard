@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using EarGuard.Audio;
 using EarGuard.Config;
 
@@ -10,18 +11,33 @@ namespace EarGuard.Tests
         {
             Console.WriteLine("[TEST] Running EndToEndIntegrationTest on real hardware...");
 
-            var configStore = new ConfigStore();
+            var configStore = TestEnvironment.Store();
             var config = EarGuardConfig.CreateDefault();
-            var engine = new AudioEngine(configStore, config);
+            using (var discovered = new ManualResetEvent(false))
+            using (var engine = new AudioEngine(configStore, config))
+            {
+            bool succeeded = false;
+            engine.DiscoveryCompleted += success =>
+            {
+                succeeded = success;
+                discovered.Set();
+            };
             engine.DevicesChanged += (s, e) =>
             {
                 Console.WriteLine("    [Event] DevicesChanged event triggered.");
             };
 
             engine.Start();
+            if (!discovered.WaitOne(10000)) throw new Exception("Hardware discovery did not complete within 10 seconds");
+            if (!succeeded) throw new Exception("Hardware discovery attempt failed");
 
             var devices = engine.GuardedDevices;
             Console.WriteLine("  Active render endpoints detected: " + devices.Count);
+            if (devices.Count == 0)
+            {
+                Console.WriteLine("[SKIP] No active render endpoints; hardware protection was not verified.");
+                return;
+            }
 
             foreach (var dev in devices)
             {
@@ -40,8 +56,8 @@ namespace EarGuard.Tests
                 }
             }
 
-            engine.Dispose();
             Console.WriteLine("[PASS] EndToEndIntegrationTest passed on real hardware!");
+            }
         }
     }
 }

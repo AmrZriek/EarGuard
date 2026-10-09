@@ -8,6 +8,7 @@ namespace EarGuard.Audio
     public class GuardedDevice : INotifyPropertyChanged, IDisposable
     {
         private float _currentVolume;
+        internal Action<Action> QueueNotification;
 
         public string DeviceId { get; set; }
         public string DeviceName { get; set; }
@@ -16,6 +17,7 @@ namespace EarGuard.Audio
         public IMMDevice DeviceCom { get; set; }
         public IAudioEndpointVolume VolumeControl { get; set; }
         public AudioEndpointCallback CallbackInstance { get; set; }
+        public bool CallbackRegistered { get; set; }
 
         /// <summary>
         /// While the current time is before this instant, the endpoint is held at the safe plug-in
@@ -27,13 +29,13 @@ namespace EarGuard.Audio
         /// restored value happens to sit below the ceiling, nothing would ever catch it. Re-applying
         /// the plug-in limit during this window closes that gap.
         /// </summary>
-        public DateTime SafePlugInUntilUtc { get; set; }
+        public long SafePlugInUntil { get; set; }
 
         public DeviceConfig Config { get; set; }
 
         public GuardedDevice()
         {
-            SafePlugInUntilUtc = DateTime.MinValue;
+            SafePlugInUntil = 0;
         }
 
         public event PropertyChangedEventHandler PropertyChanged;
@@ -125,7 +127,9 @@ namespace EarGuard.Audio
             var handler = PropertyChanged;
             if (handler != null)
             {
-                handler(this, new PropertyChangedEventArgs(propertyName));
+                Action publish = () => handler(this, new PropertyChangedEventArgs(propertyName));
+                if (QueueNotification != null) QueueNotification(publish);
+                else publish();
             }
         }
 
@@ -145,7 +149,7 @@ namespace EarGuard.Audio
         {
             try
             {
-                if (VolumeControl != null && CallbackInstance != null)
+                if (VolumeControl != null && CallbackInstance != null && CallbackRegistered)
                 {
                     VolumeControl.UnregisterControlChangeNotify(CallbackInstance);
                 }

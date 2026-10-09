@@ -13,119 +13,98 @@ namespace EarGuard.Config
         private const int TASK_RUNLEVEL_LUA = 0;
         private const int TASK_INSTANCES_IGNORE_NEW = 2;
 
+        private readonly Func<object> _connect;
+        public TaskSchedulerStartupRegistrar() : this(Connect) { }
+        internal TaskSchedulerStartupRegistrar(Func<object> connect) { _connect = connect; }
+
         public bool IsEnabled()
         {
-            object service = null;
-            try
-            {
-                service = Connect();
-                object folder = Invoke(service, "GetFolder", "\\");
-                try
-                {
-                    object task = Invoke(folder, "GetTask", StartupTaskDefinition.Build("EarGuard.exe").TaskName);
-                    Release(task);
-                    Release(folder);
-                    return true;
-                }
-                catch
-                {
-                    Release(folder);
-                    return false;
-                }
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                Release(service);
-            }
+            return Inspect(null);
         }
 
         public bool IsEnabledFor(string executablePath)
         {
-            if (string.IsNullOrEmpty(executablePath)) return false;
+            return !string.IsNullOrEmpty(executablePath) && Inspect(executablePath);
+        }
 
-            string expected;
+        private bool Inspect(string executablePath)
+        {
+            object service = null, folder = null, task = null;
             try
             {
-                expected = System.IO.Path.GetFullPath(executablePath);
+                service = _connect();
+                folder = Invoke(service, "GetFolder", "\\");
+                task = Invoke(folder, "GetTask", StartupTaskDefinition.Build("EarGuard.exe").TaskName);
+                return (bool)Get(task, "Enabled") && (executablePath == null || IsHealthyTask(task, executablePath));
             }
-            catch
-            {
-                return false;
-            }
+            catch (TargetInvocationException) { return false; }
+            catch (COMException) { return false; }
+            catch (InvalidOperationException) { return false; }
+            finally { Release(task); Release(folder); Release(service); }
+        }
 
-            object service = null;
+        internal static bool IsHealthyTask(object task, string executablePath)
+        {
+            object definition = null, settings = null, actions = null, action = null;
+            object principal = null, triggers = null, trigger = null;
             try
             {
-                service = Connect();
-                object folder = Invoke(service, "GetFolder", "\\");
-                try
-                {
-                    object task = Invoke(folder, "GetTask", StartupTaskDefinition.Build("EarGuard.exe").TaskName);
-                    try
-                    {
-                        object actions = Get(task, "Actions");
-                        try
-                        {
-                            int count = (int)Get(actions, "Count");
-                            for (int i = 1; i <= count; i++)
-                            {
-                                object action = Invoke(actions, "Item", i);
-                                try
-                                {
-                                    if ((int)Get(action, "Type") != TASK_ACTION_EXEC) continue;
-
-                                    var exec = Get(action, "Path") as string;
-                                    if (string.IsNullOrEmpty(exec)) continue;
-
-                                    string registered;
-                                    try
-                                    {
-                                        registered = System.IO.Path.GetFullPath(exec);
-                                    }
-                                    catch
-                                    {
-                                        continue;
-                                    }
-
-                                    if (string.Equals(registered, expected, StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        return true;
-                                    }
-                                }
-                                finally
-                                {
-                                    Release(action);
-                                }
-                            }
-                        }
-                        finally
-                        {
-                            Release(actions);
-                        }
-                    }
-                    finally
-                    {
-                        Release(task);
-                    }
-                    return false;
-                }
-                finally
-                {
-                    Release(folder);
-                }
-            }
-            catch
-            {
-                return false;
+                if (!(bool)Get(task, "Enabled")) return false;
+                definition = Get(task, "Definition");
+                settings = Get(definition, "Settings");
+                if (!(bool)Get(settings, "Enabled") || !(bool)Get(settings, "AllowDemandStart")
+                    || !(bool)Get(settings, "StartWhenAvailable") || (bool)Get(settings, "DisallowStartIfOnBatteries")
+                    || (bool)Get(settings, "StopIfGoingOnBatteries")
+                    || (int)Get(settings, "MultipleInstances") != TASK_INSTANCES_IGNORE_NEW
+                    || (string)Get(settings, "ExecutionTimeLimit") != "PT0S") return false;
+                principal = Get(definition, "Principal");
+                if ((int)Get(principal, "LogonType") != TASK_LOGON_INTERACTIVE_TOKEN
+                    || (int)Get(principal, "RunLevel") != TASK_RUNLEVEL_LUA
+                    || !IsCurrentUser((string)Get(principal, "UserId"))) return false;
+                triggers = Get(definition, "Triggers");
+                if ((int)Get(triggers, "Count") != 1) return false;
+                trigger = Item(triggers, 1);
+                string delay = (string)Get(trigger, "Delay");
+                if ((int)Get(trigger, "Type") != TASK_TRIGGER_LOGON || !(bool)Get(trigger, "Enabled")
+                    || (!string.IsNullOrEmpty(delay) && delay != "PT0S")
+                    || !IsCurrentUser((string)Get(trigger, "UserId"))) return false;
+                actions = Get(definition, "Actions");
+                if ((int)Get(actions, "Count") != 1) return false;
+                action = Item(actions, 1);
+                var expected = StartupTaskDefinition.Build(executablePath);
+                return (int)Get(action, "Type") == TASK_ACTION_EXEC
+                    && string.Equals((string)Get(action, "Path"), expected.ExecutablePath, StringComparison.OrdinalIgnoreCase)
+                    && (string)Get(action, "Arguments") == expected.Arguments
+                    && string.Equals((string)Get(action, "WorkingDirectory"), expected.WorkingDirectory, StringComparison.OrdinalIgnoreCase);
             }
             finally
             {
-                Release(service);
+                Release(trigger); Release(triggers); Release(principal); Release(action);
+                Release(actions); Release(settings); Release(definition);
             }
+        }
+
+        private static bool IsCurrentUser(string userId)
+        {
+            if (string.IsNullOrEmpty(userId)) return false;
+            // Scheduler may return a SID, a qualified account, or a short account name.
+            using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
+            {
+                if (identity.User == null) return false;
+                if (string.Equals(userId, identity.User.Value, StringComparison.OrdinalIgnoreCase)) return true;
+                try
+                {
+                    var account = new System.Security.Principal.NTAccount(userId);
+                    return identity.User.Equals(account.Translate(typeof(System.Security.Principal.SecurityIdentifier)));
+                }
+                catch (System.Security.Principal.IdentityNotMappedException) { return false; }
+                catch (ArgumentException) { return false; }
+            }
+        }
+
+        private static object Item(object collection, int index)
+        {
+            return collection.GetType().InvokeMember("Item", BindingFlags.GetProperty, null, collection, new object[] { index });
         }
 
         public bool Enable(string executablePath)
@@ -145,7 +124,7 @@ namespace EarGuard.Config
             object service = null;
             try
             {
-                service = Connect();
+                service = _connect();
                 object folder = Invoke(service, "GetFolder", "\\");
                 try
                 {
@@ -153,7 +132,7 @@ namespace EarGuard.Config
                     try
                     {
                         Configure(taskDefinition, definition);
-                        Invoke(folder, "RegisterTaskDefinition",
+                        object registered = Invoke(folder, "RegisterTaskDefinition",
                             definition.TaskName,
                             taskDefinition,
                             TASK_CREATE_OR_UPDATE,
@@ -161,6 +140,7 @@ namespace EarGuard.Config
                             null,
                             TASK_LOGON_INTERACTIVE_TOKEN,
                             null);
+                        Release(registered);
                     }
                     finally
                     {
@@ -188,7 +168,7 @@ namespace EarGuard.Config
             object service = null;
             try
             {
-                service = Connect();
+                service = _connect();
                 object folder = Invoke(service, "GetFolder", "\\");
                 try
                 {
@@ -248,6 +228,7 @@ namespace EarGuard.Config
             try
             {
                 Set(settings, "Enabled", true);
+                Set(settings, "ExecutionTimeLimit", "PT0S");
                 Set(settings, "AllowDemandStart", true);
                 Set(settings, "StartWhenAvailable", true);
                 Set(settings, "DisallowStartIfOnBatteries", false);
@@ -305,8 +286,8 @@ namespace EarGuard.Config
             Type serviceType = Type.GetTypeFromProgID("Schedule.Service");
             if (serviceType == null) throw new InvalidOperationException("Task Scheduler is unavailable.");
             object service = Activator.CreateInstance(serviceType);
-            Invoke(service, "Connect", new object[0]);
-            return service;
+            try { Invoke(service, "Connect", new object[0]); return service; }
+            catch { Release(service); throw; }
         }
 
         private static bool IsNotFound(TargetInvocationException ex)

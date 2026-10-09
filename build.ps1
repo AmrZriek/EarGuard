@@ -1,22 +1,44 @@
 # EarGuard Build Script (.NET Framework 4.8 / Windows)
 param(
     [switch]$NoTest,
-    [switch]$Debug
+    [switch]$Debug,
+    [switch]$BuildOnly,
+    [switch]$Deploy,
+    [switch]$HardwareTest,
+    [switch]$Pause,
+    [ValidateSet('Auto', 'Roslyn', 'Framework')][string]$Compiler = 'Auto'
 )
 
 $ErrorActionPreference = "Stop"
 
+$baseDir = $PSScriptRoot
+Set-Location $baseDir
+$outputDir = Join-Path $baseDir ('archive\builds\' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+$logPath = Join-Path $outputDir 'build.log'
+
+# Explorer's Run with PowerShell opens a temporary console. Keep its result visible.
+$pauseAtEnd = $Pause.IsPresent
+if (-not $pauseAtEnd -and [Environment]::GetCommandLineArgs() -notcontains '-NonInteractive') {
+    $launchProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($launchProcess.ParentProcessId) {
+        $parentProcess = Get-Process -Id $launchProcess.ParentProcessId -ErrorAction SilentlyContinue
+        $pauseAtEnd = $parentProcess.ProcessName -eq 'explorer'
+    }
+}
+
+Start-Transcript -LiteralPath $logPath | Out-Null
+try {
 Write-Host "=================================================" -ForegroundColor Cyan
 Write-Host "           EarGuard Build Pipeline               " -ForegroundColor Cyan
 Write-Host "=================================================" -ForegroundColor Cyan
 
-$baseDir = $PSScriptRoot
-Set-Location $baseDir
-
 $roslynCsc = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\Roslyn\csc.exe"
 $frameworkCsc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 
-$csc = if (Test-Path $roslynCsc) { $roslynCsc } else { $frameworkCsc }
+if ($BuildOnly -and $Deploy) { throw '-BuildOnly and -Deploy cannot be combined.' }
+if ($HardwareTest -and ($BuildOnly -or $NoTest)) { throw '-HardwareTest requires tests and cannot be combined with -BuildOnly.' }
+$csc = if ($Compiler -eq 'Framework') { $frameworkCsc } elseif ($Compiler -eq 'Roslyn' -or (Test-Path $roslynCsc)) { $roslynCsc } else { $frameworkCsc }
 if (-not (Test-Path $csc)) {
     Write-Error "Could not locate C# compiler."
     exit 1
@@ -48,42 +70,30 @@ $references = @(
 if (-not $NoTest) {
     Write-Host "[2/5] Building and executing test suite..." -ForegroundColor Cyan
 
-    $testSources = Get-ChildItem -Path "$baseDir\src\Config\*.cs", "$baseDir\src\Audio\*.cs", "$baseDir\src\Tray\TrayIconRecovery.cs", "$baseDir\tests\*.cs" | Select-Object -ExpandProperty FullName
+    $testSources = Get-ChildItem -Path "$baseDir\src\Config\*.cs", "$baseDir\src\Audio\*.cs", "$baseDir\src\Tray\*.cs", "$baseDir\src\UI\*.cs", "$baseDir\tests\*.cs" | Select-Object -ExpandProperty FullName
 
     $testArgs = @(
         "/nologo",
         "/t:exe",
-        "/out:$baseDir\TestRunner.exe"
+        "/langversion:5",
+        "/out:$outputDir\TestRunner.exe"
     ) + $deterministicArg + $references + $testSources
 
-    & $csc $testArgs
+    & $csc $testArgs | Out-Host
     if ($LASTEXITCODE -ne 0) {
         Write-Error "TestRunner compilation failed."
         exit 1
     }
 
     Write-Host "Executing tests..." -ForegroundColor Yellow
-    & "$baseDir\TestRunner.exe"
+    $runnerArgs = if ($HardwareTest) { @('--hardware') } else { @() }
+    & "$outputDir\TestRunner.exe" $runnerArgs | Out-Host
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Tests failed!"
         exit 1
     }
 
-    # Clean up test binary to recycle bin
-    Add-Type -AssemblyName Microsoft.VisualBasic
-    Start-Sleep -Milliseconds 200
-    foreach ($file in @("$baseDir\TestRunner.exe", "$baseDir\TestRunner.pdb")) {
-        if (Test-Path $file) {
-            for ($attempt = 0; $attempt -lt 5; $attempt++) {
-                try {
-                    [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($file, 'OnlyErrorDialogs', 'SendToRecycleBin')
-                    break
-                } catch {
-                    Start-Sleep -Milliseconds 200
-                }
-            }
-        }
-    }
+    # Retain test binaries and isolated artifacts for review.
 } else {
     Write-Host "[2/5] Skipping tests (-NoTest specified)." -ForegroundColor Yellow
 }
@@ -96,28 +106,17 @@ $appSources = Get-ChildItem -Path "$baseDir\src\Config\*.cs", "$baseDir\src\Audi
 $targetType = "/t:winexe"
 $opt = if ($Debug) { "/debug+" } else { "/optimize+", "/debug-" }
 
-# Stop a running instance before compiling into the repository.
-#
-# The compiler opens the output file for writing, and a running EarGuard holds its own executable
-# open. Without this the build fails with CS2012 and, worse, can leave a truncated EarGuard.exe
-# behind - which then breaks logon startup with "file not found" until someone rebuilds. Stopping
-# first makes the build reproducible whether or not EarGuard is currently running.
-$runningBeforeBuild = Get-Process -Name 'EarGuard' -ErrorAction SilentlyContinue
-if ($runningBeforeBuild) {
-    Write-Host "  Stopping the running EarGuard instance so the binary can be replaced..." -ForegroundColor Yellow
-    $runningBeforeBuild | Stop-Process -Force
-    Start-Sleep -Milliseconds 700
-}
-
+# Compile into a fresh directory so a failed build cannot affect a running binary.
 $iconArg = if (Test-Path "$baseDir\EarGuard.ico") { @("/win32icon:$baseDir\EarGuard.ico") } else { @() }
 $appArgs = @(
     "/nologo",
     $targetType,
     "/highentropyva+",
-    "/out:$baseDir\EarGuard.exe"
+    "/langversion:5",
+    "/out:$outputDir\EarGuard.exe"
 ) + $deterministicArg + $iconArg + $opt + $references + $appSources
 
-& $csc $appArgs
+& $csc $appArgs | Out-Host
 if ($LASTEXITCODE -ne 0) {
     Write-Error "EarGuard.exe compilation failed."
     exit 1
@@ -125,7 +124,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # Step 3: Verification
 Write-Host "[4/5] Verifying binary output..." -ForegroundColor Cyan
-$exePath = "$baseDir\EarGuard.exe"
+$exePath = "$outputDir\EarGuard.exe"
 if (Test-Path $exePath) {
     $fileItem = Get-Item $exePath
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
@@ -133,70 +132,50 @@ if (Test-Path $exePath) {
     $hashBytes = $sha256.ComputeHash($fileStream)
     $fileStream.Close()
     $hashString = [System.BitConverter]::ToString($hashBytes).Replace("-", "").ToUpperInvariant()
-    $sizeKb = [Math]::Round($fileItem.Length / 1024, 2)
+    $sizeKiB = [Math]::Round($fileItem.Length / 1024, 2)
 
-    # Step 3: Refresh the installed copy logon startup launches
-    #
-    # 'Start with Windows' registers a scheduled task against a stable per-user copy of the executable
-    # (ApplicationInstaller), not against this working tree. Rebuilding here therefore has to refresh
-    # that copy, otherwise the machine keeps running the previous build at logon while the repository
-    # holds a newer one. Only ever touched when the task is already registered - a user who has not
-    # enabled startup gets no stray files installed behind their back.
-    Write-Host "[5/5] Refreshing the installed copy used by logon startup..." -ForegroundColor Cyan
-
-    $installedExe = Join-Path $env:LOCALAPPDATA "EarGuard\EarGuard.exe"
-    $registered = $false
-    try {
-        $task = Get-ScheduledTask -TaskName "EarGuardStartup" -ErrorAction SilentlyContinue
-        if ($task) { $registered = $true }
-    } catch { }
-    if (-not $registered) {
-        try {
-            $runValue = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'EarGuard' -ErrorAction SilentlyContinue
-            if ($runValue) { $registered = $true }
-        } catch { }
-    }
-
-    if (-not $registered) {
-        Write-Host "  Startup is not registered; leaving no installed copy behind." -ForegroundColor Yellow
-    } elseif (-not (Test-Path $exePath)) {
-        Write-Host "  Skipped: no built executable to install." -ForegroundColor Yellow
-    } else {
-        try {
-            # Replacing a running binary fails, so stop the tray instance first and restart it after.
-            $running = Get-Process -Name 'EarGuard' -ErrorAction SilentlyContinue
-            $wasRunning = $null -ne $running
-            if ($wasRunning) {
-                $running | Stop-Process -Force
-                Start-Sleep -Milliseconds 700
-            }
-
-            $installDir = Split-Path $installedExe -Parent
-            if (-not (Test-Path $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }
-
-            # Compare before copying so a no-op rebuild leaves the installed file's timestamp alone.
-            $needsCopy = $true
-            if (Test-Path $installedExe) {
-                $sourceHash = (Get-FileHash $exePath -Algorithm SHA256).Hash
-                $targetHash = (Get-FileHash $installedExe -Algorithm SHA256).Hash
-                if ($sourceHash -eq $targetHash) { $needsCopy = $false }
-            }
-
-            if ($needsCopy) {
-                Copy-Item $exePath $installedExe -Force
-                Write-Host "  Installed: $installedExe" -ForegroundColor Green
-            } else {
-                Write-Host "  Installed copy already current." -ForegroundColor Green
-            }
-
-            if ($wasRunning) {
-                Start-Process $installedExe -ArgumentList '--tray'
-                Write-Host "  Restarted EarGuard from the installed location." -ForegroundColor Green
-            }
-        } catch {
-            Write-Host "  Could not refresh the installed copy: $($_.Exception.Message)" -ForegroundColor Yellow
-            Write-Host "  The running instance keeps its current registration." -ForegroundColor Yellow
+    if ($Deploy) {
+        $installedExe = Join-Path $env:LOCALAPPDATA 'EarGuard\EarGuard.exe'
+        $registered = $null -ne (Get-ScheduledTask -TaskName 'EarGuardStartup' -ErrorAction SilentlyContinue)
+        if (-not $registered) {
+            $registered = $null -ne (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'EarGuard' -ErrorAction SilentlyContinue)
         }
+        if (-not $registered) { throw 'Startup is not registered; no installed copy was changed.' }
+        $needsCopy = -not (Test-Path -LiteralPath $installedExe)
+        if (-not $needsCopy) { $needsCopy = (Get-FileHash -LiteralPath $installedExe).Hash -ne $hashString }
+        if ($needsCopy) {
+            $installDir = Split-Path $installedExe -Parent
+            New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+            $staged = Join-Path $installDir ('EarGuard.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+            Copy-Item -LiteralPath $exePath -Destination $staged
+            if ((Get-FileHash -LiteralPath $staged).Hash -ne $hashString) { throw 'Staged executable verification failed.' }
+            # Capture the original process and arguments once, before stopping any instance.
+            $instances = @(Get-CimInstance Win32_Process -Filter "Name = 'EarGuard.exe'" |
+                Where-Object { $_.ExecutablePath -eq $installedExe })
+            $stopped = @()
+            try {
+                foreach ($instance in $instances) {
+                    $process = Get-Process -Id $instance.ProcessId -ErrorAction Stop
+                    if ($process.Path -ne $installedExe) { throw 'Process identity changed before deployment.' }
+                    $launchArgs = $instance.CommandLine -replace '^\s*("[^"]+"|\S+)\s*', ''
+                    Stop-Process -Id $instance.ProcessId -Force -ErrorAction Stop
+                    $stopped += [PSCustomObject]@{ Path = $instance.ExecutablePath; Arguments = $launchArgs }
+                    $process.WaitForExit()
+                }
+                if (Test-Path -LiteralPath $installedExe) {
+                    [IO.File]::Replace($staged, $installedExe, $installedExe + '.' + [Guid]::NewGuid().ToString('N') + '.bak')
+                } else { [IO.File]::Move($staged, $installedExe) }
+            } finally {
+                foreach ($instance in $stopped) {
+                    $start = @{ FilePath = $instance.Path; WindowStyle = 'Hidden'; WorkingDirectory = $installDir }
+                    if ($instance.Arguments) { $start.ArgumentList = $instance.Arguments }
+                    Start-Process @start
+                }
+            }
+            Write-Host "  Installed: $installedExe" -ForegroundColor Green
+        } else { Write-Host '  Installed copy already current; no process stopped.' -ForegroundColor Green }
+    } else {
+        Write-Host '[5/5] Build only: running processes and installed executable unchanged.' -ForegroundColor Cyan
     }
 
     Write-Host ""
@@ -204,7 +183,8 @@ if (Test-Path $exePath) {
     Write-Host "  BUILD SUCCESSFUL!" -ForegroundColor Green
     Write-Host "=================================================" -ForegroundColor Green
     Write-Host "  Binary:      $exePath"
-    Write-Host "  Size:        $sizeKb KB"
+    Write-Host "  The repository-root EarGuard.exe is not replaced. Run or copy the Binary path above."
+    Write-Host "  Size:        $sizeKiB KiB"
     Write-Host "  SHA256:      $hashString"
     Write-Host "  Target:      .NET Framework 4.8 (Single Portable .exe)"
     Write-Host "  Zero external dependencies. Ready to distribute."
@@ -212,4 +192,12 @@ if (Test-Path $exePath) {
 } else {
     Write-Error "EarGuard.exe was not created."
     exit 1
+}
+} catch {
+    Write-Host ("BUILD FAILED: " + $_.Exception.Message) -ForegroundColor Red
+    throw
+} finally {
+    Write-Host "Build log: $logPath"
+    Stop-Transcript | Out-Null
+    if ($pauseAtEnd) { [void](Read-Host 'Press Enter to close this window') }
 }
