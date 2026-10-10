@@ -2,7 +2,7 @@
 
 ## Current state
 
-The working version is **v1.1.3**: assembly/file version `1.1.3.0`, informational version `1.1.3`. The last committed public version is **v1.1.2**. The v1.1.3 changes are uncommitted and have not been published.
+The working version is **v1.1.3**: assembly/file version `1.1.3.0`, informational version `1.1.3`. Tagged `v1.1.3` on 2026-10-09 with a clean working tree; the last version with a published GitHub release is **v1.1.2**.
 
 This is a reliability patch. It improves audio-device discovery and callback recovery, settings persistence and backup recovery, startup registration, live-volume readings, and logo handling.
 
