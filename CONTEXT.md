@@ -2,7 +2,7 @@
 
 ## Current state
 
-The working version is **v1.1.3**: assembly/file version `1.1.3.0`, informational version `1.1.3`. Tagged `v1.1.3` on 2026-10-09 with a clean working tree; the last version with a published GitHub release is **v1.1.2**.
+The working version is **v1.1.3**: assembly/file version `1.1.3.0`, informational version `1.1.3`. Tagged and released on 2026-10-09 with a clean working tree; it is the latest published GitHub release (`EarGuard.exe`, 94,208 bytes, SHA-256 `109166E5B50690570AF410F70C00A2402060C18F448C8A92347FE3B92959BEC7`). The previous published version is **v1.1.2**.
 
 This is a reliability patch. It improves audio-device discovery and callback recovery, settings persistence and backup recovery, startup registration, live-volume readings, and logo handling.
 

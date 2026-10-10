@@ -1,6 +1,6 @@
 # EarGuard — Architecture Specification & Engineering Reference
 
-Current source version: **v1.1.3**, prepared for release. Assembly/file version: `1.1.3.0`; informational version: `1.1.3`. Last committed public version: **v1.1.2**.
+Current source version: **v1.1.3**, tagged and released 2026-10-09 as the latest GitHub release. Assembly/file version: `1.1.3.0`; informational version: `1.1.3`. Previous published version: **v1.1.2**.
 
 ## 1. Executive Summary
 EarGuard is a lightweight, zero-dependency, portable Windows application (.NET Framework 4.8 / WPF) that detects and lowers endpoint volume above configured limits. It targets unexpected volume changes during device connection, Windows Audio Service initialization, and playback. Enforcement is reactive: it cannot block playback before a change, guarantee no brief spikes, or guarantee hearing safety. Device and driver support determine whether endpoint-volume changes affect exclusive-mode playback.
@@ -133,7 +133,7 @@ Two entry points. The response file is the minimal path:
 csc @EarGuard.rsp
 ```
 
-The globs in that file must use backslashes (`src\Audio\*.cs`). With forward slashes the compiler resolves each wildcard against the current directory and reports all 17 sources as missing, which looks like a broken checkout rather than a path bug.
+The globs in that file must use backslashes (`src\Audio\*.cs`). With forward slashes the compiler resolves each wildcard against the current directory and reports all 19 sources as missing, which looks like a broken checkout rather than a path bug.
 
 The full pipeline runs the test suite first, then builds the app, then prints its SHA-256:
 

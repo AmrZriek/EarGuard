@@ -79,9 +79,24 @@ No bloated Electron. No web views. No 300 MB installer. Just a compact, native W
 ## 🚀 Quick Start
 
 1. Download [**EarGuard.exe**](https://github.com/AmrZriek/EarGuard/releases/latest/download/EarGuard.exe) from the [Releases](https://github.com/AmrZriek/EarGuard/releases/latest) page.
-2. Run `EarGuard.exe`. It opens the window and detects your audio outputs.
-3. Select your headphone/DAC dongle from the dropdown, verify `[✓] Protect` is checked, and set your **Hard Volume Ceiling** (e.g. `30%`) and **Safe Plug-in Limit** (e.g. `5%`).
-4. Check **"Start with Windows"** and minimize to tray. Keep your listening volume low; EarGuard is an extra precaution, not a hearing-safety guarantee.
+2. Double-click `EarGuard.exe`. There is no installer and it does not need administrator rights; it is a single portable executable.
+3. It opens the window and lists your playback devices. Select your headphone/DAC dongle from the dropdown, verify `[✓] Protect` is checked, and set your **Hard Volume Ceiling** (e.g. `30%`) and **Safe Plug-in Limit** (e.g. `5%`).
+4. Check **"Start with Windows"**, then close the window to leave EarGuard running in the tray. Keep your listening volume low; EarGuard is an extra precaution, not a hearing-safety guarantee.
+
+> **Windows SmartScreen.** `EarGuard.exe` is an unsigned portable binary, so the first time you run it Windows may show a "Windows protected your PC" screen. Click **More info**, then **Run anyway**. The file is built from the source in this repository, and every release lists its SHA-256 (see Release Notes below) so you can verify the download.
+
+---
+
+## What EarGuard does not protect against
+
+EarGuard is a volume safety net, not a hearing-safety guarantee and not a sound limiter:
+
+- **It does not measure sound pressure.** A ceiling of `30%` is a Windows volume scalar, not a dB SPL figure. It says nothing about how loud your IEMs actually play.
+- **It cannot promise it reacts first.** Enforcement is reactive, so a brief blast can reach your ears before the callbacks and the watchdog pull the level back down.
+- **It does not cover every driver or playback path.** It controls the Windows endpoint volume, below the player. In WASAPI exclusive mode it only bites when the device and driver expose hardware volume. It also cannot reach a player that writes bit-perfect output straight to a fixed line-level DAC.
+- **It does not stop Windows initializing an endpoint at 100%.** It lowers the level after the fact.
+- **It does not change per-app volume or mute.** It works on the Windows output endpoint only.
+- **It does nothing for a device whose `Protect` box is unchecked,** or while EarGuard is not running.
 
 ---
 

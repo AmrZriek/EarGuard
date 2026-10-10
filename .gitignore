@@ -10,6 +10,12 @@ TestRunner.pdb
 [0-9a-fA-F]*_EarGuard.exe
 archive/
 
+# Build outputs
+EarGuard.exe
+bin/
+obj/
+*.log
+
 # OS / Editor files
 .vs/
 .idea/
