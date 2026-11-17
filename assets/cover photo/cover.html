@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en" data-variant="wide">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EarGuard — cover</title>
+<link rel="stylesheet" href="cover.css">
+<script>
+  const requested = new URLSearchParams(location.search).get('variant');
+  if (requested) document.documentElement.dataset.variant = requested;
+</script>
+</head>
+<body>
+<main class="poster">
+  <header class="masthead">
+    <div class="brand">
+      <span class="brand-name">EarGuard</span>
+    </div>
+    <div class="meta">
+      <span>WINDOWS 10 / 11</span>
+      <span>FREE &amp; OPEN SOURCE</span>
+    </div>
+  </header>
+
+  <div class="rule" aria-hidden="true"></div>
+
+  <p class="eyebrow">SAFETY NOTICE <span class="eyebrow-dot">·</span> WINDOWS AUDIO</p>
+
+  <h1 class="headline">
+    <span class="headline-line headline-line--a">Accidental 100%</span>
+    <span class="headline-line headline-line--b">happens.</span>
+    <span class="headline-line headline-line--c">Not for long.</span>
+  </h1>
+
+  <p class="sub">EarGuard turns down unexpected Windows volume changes. Free, portable, open source.</p>
+
+  <div class="spacer" aria-hidden="true"></div>
+
+  <section class="beam-stage" aria-label="Example volume meter">
+    <div class="beam-zone">
+      <div class="beam">
+        <div class="fill fill--safe"></div>
+        <div class="fill fill--over"></div>
+      </div>
+      <div class="post" aria-hidden="true"></div>
+      <div class="mascot-shadow" aria-hidden="true"></div>
+      <img class="mascot" src="assets/earguard-mark-3x.png" alt="EarGuard's ear-in-a-hard-hat mark">
+    </div>
+    <div class="scale">
+      <span class="scale-zero">0</span>
+      <span class="limit-label">YOUR LIMIT <span class="limit-dot">·</span> 30%</span>
+      <span class="scale-max">100%</span>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <ul class="pills">
+      <li>NO INSTALLER</li>
+      <li class="pill--gold">92 KB</li>
+      <li>OPEN SOURCE</li>
+    </ul>
+    <p class="note">Example limit. Windows volume setting, not listening loudness.</p>
+  </footer>
+</main>
+</body>
+</html>

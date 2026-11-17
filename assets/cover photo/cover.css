@@ -1,0 +1,563 @@
+@font-face {
+  font-family: "Cormorant Garamond";
+  src: url("assets/fonts/cormorant-garamond-300.woff2") format("woff2");
+  font-weight: 300;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Cormorant Garamond";
+  src: url("assets/fonts/cormorant-garamond-300-italic.woff2") format("woff2");
+  font-weight: 300;
+  font-style: italic;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Cormorant Garamond";
+  src: url("assets/fonts/cormorant-garamond-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Montserrat";
+  src: url("assets/fonts/montserrat-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Montserrat";
+  src: url("assets/fonts/montserrat-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Montserrat";
+  src: url("assets/fonts/montserrat-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+}
+
+:root {
+  --paper: #fdfbf7;
+  --surface: #f4f0e8;
+  --ink: #1a1a1a;
+  --ink-2: #4a4a4a;
+  --muted: #70695f;
+  --gold: #a68d71;
+  --gold-dark: #796244;
+  --gold-light: #dfc196;
+  --red: #b44332;
+  --line: #e6e0d4;
+
+  --frame: 32px;
+  --pad-x: 64px;
+  --pad-y: 44px;
+  --headline-size: 76px;
+  --sub-size: 19px;
+  --sub-width: 620px;
+  --beam-height: 88px;
+  --mascot-height: 132px;
+  --mascot-right: 64px;
+  --footer-gap: 24px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  position: relative;
+  padding: var(--frame);
+  overflow: hidden;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Montserrat", sans-serif;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(980px 620px at 13% -12%, #ffffff 0%, rgba(255, 255, 255, 0) 64%),
+    radial-gradient(760px 480px at 106% 112%, rgba(166, 141, 113, 0.13) 0%, rgba(166, 141, 113, 0) 62%);
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.045;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='.55'/%3E%3C/svg%3E");
+}
+
+.poster {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  padding: var(--pad-y) var(--pad-x);
+  border: 1px solid var(--line);
+}
+
+.poster::before,
+.poster::after {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 0 solid var(--gold);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.poster::before {
+  top: 10px;
+  left: 10px;
+  border-top-width: 1px;
+  border-left-width: 1px;
+}
+
+.poster::after {
+  right: 10px;
+  bottom: 10px;
+  border-right-width: 1px;
+  border-bottom-width: 1px;
+}
+
+/* Masthead */
+
+.masthead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.brand-name {
+  display: block;
+  font-family: "Cormorant Garamond", Georgia, serif;
+  font-size: 44px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.meta {
+  padding-top: 3px;
+  text-align: right;
+  font-family: "Montserrat", sans-serif;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.9;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+}
+
+.meta span {
+  display: block;
+}
+
+.meta span:last-child {
+  color: var(--gold-dark);
+}
+
+.rule {
+  height: 1px;
+  margin-top: 22px;
+  background: var(--line);
+}
+
+/* Copy */
+
+.eyebrow {
+  margin: 32px 0 0;
+  font-family: "Montserrat", sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.22em;
+  color: var(--gold-dark);
+}
+
+.eyebrow-dot {
+  margin: 0 0.35em;
+  color: var(--gold);
+}
+
+.headline {
+  margin: 4px 0 0;
+  font-family: "Cormorant Garamond", Georgia, serif;
+  font-size: var(--headline-size);
+  font-weight: 300;
+  line-height: 0.96;
+  letter-spacing: -0.018em;
+  color: var(--ink);
+  font-feature-settings: "kern" 1, "liga" 1, "lnum" 1;
+}
+
+.headline-line {
+  display: block;
+}
+
+.headline-line--a,
+.headline-line--b {
+  display: inline;
+}
+
+.headline-line--c {
+  font-style: italic;
+}
+
+.sub {
+  max-width: var(--sub-width);
+  margin: 20px 0 0;
+  font-family: "Montserrat", sans-serif;
+  font-size: var(--sub-size);
+  font-weight: 400;
+  line-height: 1.5;
+  letter-spacing: -0.005em;
+  color: var(--ink-2);
+}
+
+.spacer {
+  flex: 1 1 auto;
+  min-height: 24px;
+}
+
+/* Volume beam */
+
+.beam-stage {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.beam-zone {
+  position: relative;
+  height: var(--beam-height);
+}
+
+.beam {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border: 1px solid rgba(26, 26, 26, 0.09);
+  border-radius: 4px;
+  background: var(--surface);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    inset 0 2px 6px rgba(26, 26, 26, 0.08),
+    0 1px 2px rgba(26, 26, 26, 0.05);
+}
+
+.fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.fill--safe {
+  left: 0;
+  width: 30%;
+  background: linear-gradient(180deg, #b39a7c 0%, #a68d71 55%, #9b8368 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24);
+}
+
+.fill--over {
+  left: 30%;
+  right: 0;
+  background: linear-gradient(180deg, #bf4c3b 0%, #b44332 55%, #a83c2c 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+
+.fill--over::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.09) 0,
+    rgba(255, 255, 255, 0.09) 1px,
+    rgba(255, 255, 255, 0) 1px,
+    rgba(255, 255, 255, 0) 7px
+  );
+}
+
+.post {
+  position: absolute;
+  top: -14px;
+  bottom: -10px;
+  left: 30%;
+  z-index: 3;
+  width: 2px;
+  transform: translateX(-1px);
+  background: var(--gold-dark);
+}
+
+.post::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: var(--gold-dark);
+  box-shadow: 0 0 0 3px var(--paper);
+}
+
+.mascot-shadow {
+  position: absolute;
+  right: calc(var(--mascot-right) + 16px);
+  bottom: calc(100% - 8px);
+  z-index: 2;
+  width: 76px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(26, 26, 26, 0.2);
+  filter: blur(5px);
+}
+
+.mascot {
+  position: absolute;
+  right: var(--mascot-right);
+  bottom: calc(100% - 2px);
+  z-index: 4;
+  display: block;
+  width: auto;
+  height: var(--mascot-height);
+  filter: drop-shadow(0 10px 10px rgba(26, 26, 26, 0.15));
+}
+
+.scale {
+  position: relative;
+  height: 24px;
+  margin-top: 10px;
+  font-family: "Montserrat", sans-serif;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+}
+
+.scale-zero {
+  position: absolute;
+  top: 4px;
+  left: 0;
+}
+
+.scale-max {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--red);
+}
+
+.limit-label {
+  position: absolute;
+  top: 3px;
+  left: 30%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  color: var(--gold-dark);
+}
+
+.limit-dot {
+  color: var(--gold);
+}
+
+/* Footer */
+
+.footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 32px;
+  margin-top: var(--footer-gap);
+}
+
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pills li {
+  padding: 8px 13px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #ffffff;
+  font-family: "Montserrat", sans-serif;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  color: var(--ink-2);
+}
+
+.pills .pill--gold {
+  border-color: var(--gold-light);
+  background: #fbf5e9;
+  color: var(--gold-dark);
+}
+
+.note {
+  max-width: 330px;
+  margin: 0;
+  text-align: right;
+  font-family: "Montserrat", sans-serif;
+  font-size: 9px;
+  font-weight: 400;
+  line-height: 1.6;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+}
+
+/* Square: Gumroad thumbnail / Instagram */
+
+html[data-variant="square"] {
+  --frame: 28px;
+  --pad-x: 52px;
+  --pad-y: 44px;
+  --headline-size: 96px;
+  --sub-size: 21px;
+  --sub-width: 720px;
+  --beam-height: 110px;
+  --mascot-height: 150px;
+  --mascot-right: 52px;
+  --footer-gap: 30px;
+}
+
+html[data-variant="square"] .brand-name {
+  font-size: 54px;
+}
+
+html[data-variant="square"] .meta {
+  font-size: 10px;
+}
+
+html[data-variant="square"] .rule {
+  margin-top: 28px;
+}
+
+html[data-variant="square"] .eyebrow {
+  margin-top: 40px;
+}
+
+html[data-variant="square"] .headline {
+  margin-top: 10px;
+  line-height: 0.98;
+}
+
+html[data-variant="square"] .headline-line--a,
+html[data-variant="square"] .headline-line--b {
+  display: block;
+}
+
+html[data-variant="square"] .sub {
+  margin-top: 30px;
+}
+
+html[data-variant="square"] .mascot-shadow {
+  right: calc(var(--mascot-right) + 20px);
+  width: 86px;
+  height: 11px;
+}
+
+/* Wide strip: GitHub social preview / OG image */
+
+html[data-variant="strip"] {
+  --frame: 24px;
+  --pad-x: 52px;
+  --pad-y: 36px;
+  --headline-size: 62px;
+  --sub-size: 16px;
+  --sub-width: 760px;
+  --beam-height: 76px;
+  --mascot-height: 100px;
+  --mascot-right: 48px;
+  --footer-gap: 20px;
+}
+
+html[data-variant="strip"] .brand-name {
+  font-size: 36px;
+}
+
+html[data-variant="strip"] .meta {
+  padding-top: 2px;
+}
+
+html[data-variant="strip"] .rule {
+  margin-top: 18px;
+}
+
+html[data-variant="strip"] .eyebrow {
+  margin-top: 28px;
+  font-size: 9px;
+}
+
+html[data-variant="strip"] .headline {
+  margin-top: 2px;
+}
+
+html[data-variant="strip"] .sub {
+  margin-top: 18px;
+}
+
+html[data-variant="strip"] .mascot-shadow {
+  right: calc(var(--mascot-right) + 10px);
+  width: 62px;
+  height: 8px;
+}
+
+html[data-variant="strip"] .pills li {
+  padding: 7px 11px;
+  font-size: 8px;
+}
+
+html[data-variant="strip"] .note {
+  font-size: 8px;
+}
+
+@media (max-height: 650px) {
+  html[data-variant="strip"] {
+    --headline-size: 58px;
+    --beam-height: 72px;
+    --mascot-height: 94px;
+  }
+}

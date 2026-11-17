@@ -3,7 +3,7 @@
 > **Hardware Volume Spike Protector for IEM & Headphone Audiophiles**
 
 <p align="center">
-  <img src="EarGuard.png" alt="EarGuard Logo" width="140" height="140" />
+  <img src="assets/cover%20photo/exports/earguard-cover-16x9-1280x720.jpg" alt="EarGuard cover: Accidental 100% happens. Not for long." width="880" />
 </p>
 
 <p align="center">
@@ -87,6 +87,14 @@ No bloated Electron. No web views. No 300 MB installer. Just a compact, native W
 
 ---
 
+## A listener's report
+
+> "Windows always defaults to 100% volume the first time a new usb audio device is connected."
+
+[cyanfeld, in the r/inearfidelity discussion](https://www.reddit.com/r/inearfidelity/comments/1wbxhj1/dont_overlook_the_dangers_of_loud_volume_protect/) described the same new-device experience. This is a user's report; device and driver behavior can vary.
+
+---
+
 ## What EarGuard does not protect against
 
 EarGuard is a volume safety net, not a hearing-safety guarantee and not a sound limiter:
@@ -117,6 +125,8 @@ For a quick build with the C# compiler included with Windows:
 ```
 
 This creates `EarGuard.exe` in the repository directory. Close any copy running from that directory first.
+
+Project context, architecture and contributor guidance are in the [documentation index](docs/README.md).
 
 ---
 
@@ -163,7 +173,7 @@ Initial release of EarGuard for Windows. See the [v1.0.0 release](https://github
 
 ## ☕ Support
 
-If EarGuard helped you catch an unexpected volume change, consider buying me a coffee!
+If EarGuard helped you catch an unexpected volume change, consider buying me a coffee! A free, pay-what-you-want Gumroad supporter draft is also in private review; the GitHub release above remains the download source until approval. Draft copy and contents are in [GUMROAD.md](docs/marketing/GUMROAD.md).
 
 [![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/amrzriek)
 

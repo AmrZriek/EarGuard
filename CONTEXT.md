@@ -22,7 +22,8 @@ A three-second grace period applies the Safe Plug-in Limit (5% by default) after
 - `src/UI/`: the main window and its settings controls.
 - `tests/`: regression tests; real audio integration is opt-in.
 - `README.md`: public product description, setup, and user-facing release notes. Keep implementation and review details out of it.
-- `SPEC.md`: architecture, safety constraints, and build/test procedures.
+- [docs/README.md](docs/README.md): documentation router, contributor entry points, retained-history policy, and existing semantic retrieval setup.
+- [docs/SPEC.md](docs/SPEC.md): architecture, safety constraints, and build/test procedures.
 
 ## Startup and tray behavior
 
@@ -37,3 +38,10 @@ The installed copy contains only the executable. Logo loading must support the e
 Repository: https://github.com/AmrZriek/EarGuard
 
 License: MIT. Optional donations: https://ko-fi.com/amrzriek
+
+## Organization verification — 2026-10-26
+
+Moved the active specification and unpublished Gumroad draft to `docs/SPEC.md` and `docs/marketing/GUMROAD.md`, with byte-identical contents and routing through `docs/README.md`, preserving the pre-existing README edits. Resume verification confirmed unchanged source, tests, build files, assets and root executable, valid live local links, and a clean `git diff --check`; earlier logs record Framework success and Roslyn success on retry after an icon-handle assertion failure, not a new build or hardware validation in this resume. `AGENTS.md` creation remains denied; retrieval guidance lives in the docs router and shared-index refresh belongs to its separate owner.
+
+### External knowledge graph generation — 2026-10-26
+Generated a fresh code-only AST knowledge graph (612 nodes, 1,691 edges, 26 communities via graphify 0.9.96) externally under `E:/AI/graphify-index/projects/earguard/`, keeping the repository clean of local graph artifacts. Diagnostics confirmed zero dangling endpoints, zero archive leakage, and functional read-only symbol query retrieval without LLM calls. Timestamp recorded (2026-10-26T21:05:00Z) for parent coordinator awareness.
